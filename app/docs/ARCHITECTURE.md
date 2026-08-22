@@ -1,4 +1,4 @@
-# Photo Select AI v0.5.2 — portrait + group selection
+# Photo Select AI v0.5.3 — portrait + group selection
 
 Current build supports independent Portrait and Group workflows.
 
@@ -122,8 +122,19 @@ classification.
 
 Normal Portrait writes only the RED winner. In optional multi-pose Portrait,
 one global RED plus YELLOW labels for accepted distinct poses may be written.
-JPEG uses an embedded standard XMP APP1 packet without pixel recompression.
-Camera RAW and other sidecar-oriented formats use `.xmp` next to the source file.
+
+Existing XMP is treated as user data and is never rebuilt with an XML serializer.
+Only the `xmp:Label` property is surgically changed or removed; Camera Raw
+settings, rating, crop, masks, keywords, custom namespaces and packet formatting
+remain untouched. Sidecars are atomically replaced after the surgical edit.
+
+JPEG standard XMP is updated inside its APP1 segment without pixel
+recompression. Existing embedded XMP in TIFF/DNG and compatible TIFF-based RAW
+containers is updated in-place only when the XMP payload can remain exactly the
+same byte length; PSD image-resource XMP follows the same rule. If an embedded
+packet cannot be changed without resizing/rebuilding its container, the source
+file is left untouched and a sidecar `.xmp` is used instead. Unsupported
+proprietary embedded-XMP containers are likewise left untouched.
 
 
 ## Windows CUDA DLL loading (v0.2.5)

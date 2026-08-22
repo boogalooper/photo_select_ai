@@ -192,7 +192,7 @@ PORTRAIT_REPEAT_CODES = {value: label for label, value in PORTRAIT_REPEAT_MODES.
 class MainWindow(tk.Tk):
     def __init__(self, config: dict, initial_folder: str | None = None):
         super().__init__()
-        self.title("Photo Select AI v0.5.2 — Portrait + Groups")
+        self.title("Photo Select AI v0.5.3 — портреты и группы")
         # Group quick-start has two additional option rows.  Use a taller
         # default on normal desktop displays, but never force the window beyond
         # the usable height of a smaller screen.
@@ -531,7 +531,7 @@ class MainWindow(tk.Tk):
         ToolTip(gp, "Рекомендуется: «Глаза прежде всего». Групповые правила хранятся отдельно от портретных и не меняют уже настроенный портретный отбор.")
         ttk.Label(groups, textvariable=self.group_profile_desc_var, wraplength=520).grid(row=0, column=3, columnspan=4, sticky="w", padx=(4, 0))
 
-        ttk.Label(groups, text="Preview:").grid(row=1, column=0, sticky="w", pady=1)
+        ttk.Label(groups, text="Размер изображения для анализа:").grid(row=1, column=0, sticky="w", pady=1)
         e1 = ttk.Entry(groups, textvariable=self.group_preview_var, width=7)
         e1.grid(row=1, column=1, sticky="w", padx=(4, 12), pady=1)
         ToolTip(e1, "Минимум: 1600\nМаксимум: 6000\nРекомендуется: 2800–4000\nПо умолчанию: 3200\n\nБольше → лучше видны маленькие лица, но анализ медленнее.")
@@ -558,12 +558,12 @@ class MainWindow(tk.Tk):
         ToolTip(c2, "Рекомендуется: включено при повторных прогонах группового режима.")
         c3 = ttk.Checkbutton(
             groups,
-            text="Дополнительный high-res поиск пропущенных лиц (медленнее)",
+            text="Поиск маленьких лиц: улучшенный дополнительный проход (медленнее)",
             variable=self.group_highres_rescue_var,
         )
         c3.grid(row=3, column=0, columnspan=7, sticky="w", pady=(4, 0))
         self.group_highres_check = c3
-        ToolTip(c3, "Только для групп. После обычного прохода повторно анализирует уже найденные серии более чувствительным детектором. Может вернуть редкое пропущенное маленькое лицо, но заметно увеличивает время работы. По умолчанию выключено.")
+        ToolTip(c3, "Только для групп. Это соответствует улучшенному поиску маленьких лиц: после обычного прохода программа повторно анализирует уже найденные серии более чувствительным детектором. Может вернуть редкое пропущенное маленькое лицо, но заметно увеличивает время работы. Алгоритм состава группы и значения по умолчанию не изменены.")
         c4 = ttk.Checkbutton(
             groups,
             text="Учитывать взгляд в камеру — финальная проверка лучших дублей (экспериментально)",
@@ -581,7 +581,7 @@ class MainWindow(tk.Tk):
             "Портреты — метод разделения серий:",
             self.series_algorithm_var,
             ("dbscan", "sequential"),
-            "dbscan — глобально кластеризует embeddings внутри временного блока. sequential — ищет смену ребёнка по соседним кадрам. Оба метода сохраняются; профиль ниже теперь не переключает метод.",
+            "dbscan — сопоставляет лица во всём временном блоке и затем разделяет его на последовательные серии. Обычно это наиболее устойчивый вариант. sequential — сравнивает соседние кадры по порядку съёмки и подтверждает смену человека несколькими кадрами. Профиль параметров серии настраивается отдельно.",
         )
 
         series_profile_row = row
@@ -911,7 +911,7 @@ class MainWindow(tk.Tk):
         row = self._spin_row(tab, row, "Группы — мин. площадь лица, %:", self.group_min_face_pct_var, 0.005, 1.0, 0.005,
             "По умолчанию 0.035%. Отсекает очень маленькие/фоновые детекции при формировании stable roster.")
         row = self._section(tab, row, "Дополнительный high-res проход")
-        row = self._check_row(tab, row, "Включить high-res поиск пропущенных лиц:", self.group_highres_rescue_var,
+        row = self._check_row(tab, row, "Включить улучшенный поиск маленьких лиц:", self.group_highres_rescue_var,
             "По умолчанию выключено. Повышает полноту распознавания групп, но заметно увеличивает время работы.")
         for label, var, lo, hi, inc, help_text in [
             ("High-res — размер детектора, px:", self.group_highres_det_size_var, 1024, 2048, 32, "По умолчанию 1536. Больше → медленнее и выше расход VRAM."),
@@ -944,13 +944,13 @@ class MainWindow(tk.Tk):
         tab.columnconfigure(1, weight=1)
         row = 0
         ttk.Label(tab, text="Общие настройки производительности и InsightFace/CUDA. Они применяются и к портретам, и к группам.", wraplength=790).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10)); row += 1
-        row = self._spin_row(tab, row, "Потоки предзагрузки изображений:", self.cpu_workers_var, 1, 8, 1,
-            "Рекомендуется: 2. Пока GPU анализирует текущий кадр, CPU заранее читает/декодирует следующий. 1 отключает предзагрузку. На машине с 96 ГБ RAM можно попробовать 3–4; выше обычно пользы мало.")
+        row = self._spin_row(tab, row, "Параллельные задачи чтения и метаданных:", self.cpu_workers_var, 1, 8, 1,
+            "Рекомендуется: 2. Это число используется для параллельной подготовки XMP-меток и предзагрузки изображений. Файлы с общим sidecar XMP всегда обрабатываются последовательно. На SSD можно попробовать 3–4; для HDD слишком большое значение может не ускорить работу. 1 полностью отключает эту параллельность.")
         row = self._section(tab, row, "Экспериментальное ускорение GPU")
         row = self._check_row(tab, row, "Параллельный InsightFace-анализ:", self.parallel_face_analysis_var,
             "По умолчанию выключено. Создаёт несколько независимых InsightFace/ONNX Runtime сессий и анализирует разные кадры одновременно. Это увеличивает расход VRAM. Для 32 ГБ VRAM разумно начать с 2 сессий.")
         r = row
-        row = self._spin_row(tab, row, "Параллельных InsightFace-сессий:", self.parallel_face_workers_var, 2, 4, 1,
+        row = self._spin_row(tab, row, "Параллельных GPU-сеансов InsightFace:", self.parallel_face_workers_var, 2, 4, 1,
             "Действует только при включённом параллельном анализе. Начните с 2. 3–4 могут дать прирост только если одна сессия не загружает GPU полностью; расход VRAM растёт примерно вместе с числом сессий.")
         self._parallel_face_option_widgets.extend(self._grid_row_widgets(tab, r))
         ttk.Label(tab, text="Результаты параллельного анализа собираются обратно в исходном порядке кадров. Если дополнительная CUDA-сессия не создастся, программа продолжит с меньшим числом сессий.", wraplength=790).grid(row=row, column=0, columnspan=3, sticky="w", pady=(6, 10)); row += 1

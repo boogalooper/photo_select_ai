@@ -135,3 +135,227 @@ class XmpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class XmpPreservationTests(unittest.TestCase):
+    def _photo(self, path: Path, extension: str) -> PhotoFile:
+        return PhotoFile(path, datetime.now(), 1, extension)
+
+    def test_existing_sidecar_is_surgically_updated(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.CR3"
+            photo_path.write_bytes(b"raw")
+            sidecar = photo_path.with_suffix(".xmp")
+            original = (
+                b'<?xpacket begin="\xef\xbb\xbf" id="abc"?>\r\n'
+                b'<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+                b'xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" '
+                b'xmlns:dc="http://purl.org/dc/elements/1.1/">\r\n'
+                b'<!-- keep this comment exactly -->\r\n'
+                b'<rdf:RDF><rdf:Description rdf:about="" crs:Exposure2012="+0.55" crs:CropTop="0.123" '
+                b'xmp:Rating="4" xmp:Label="Old"><dc:subject><rdf:Bag><rdf:li>School</rdf:li>'
+                b'</rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta>\r\n'
+                b'<?xpacket end="w"?>'
+            )
+            sidecar.write_bytes(original)
+            XmpWriter(CFG).write(self._photo(photo_path, ".cr3"), "red")
+            updated = sidecar.read_bytes()
+            self.assertEqual(updated, original.replace(b'xmp:Label="Old"', b'xmp:Label="Select"'))
+
+    def test_clear_sidecar_removes_only_matching_label_bytes(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.NEF"
+            photo_path.write_bytes(b"raw")
+            sidecar = photo_path.with_suffix(".xmp")
+            original = (
+                b'<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+                b'xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">'
+                b'<rdf:RDF><rdf:Description rdf:about="" crs:Contrast2012="17" xmp:Rating="5" xmp:Label="Select"/>'
+                b'</rdf:RDF></x:xmpmeta>'
+            )
+            sidecar.write_bytes(original)
+            writer = XmpWriter(CFG)
+            self.assertTrue(writer.clear_label(self._photo(photo_path, ".nef"), "red"))
+            updated = sidecar.read_bytes()
+            self.assertEqual(updated, original.replace(b' xmp:Label="Select"', b""))
+            self.assertIn(b'crs:Contrast2012="17"', updated)
+            self.assertIn(b'xmp:Rating="5"', updated)
+
+    def test_clear_does_not_touch_a_different_manual_label(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.CR3"
+            photo_path.write_bytes(b"raw")
+            sidecar = photo_path.with_suffix(".xmp")
+            original = (
+                b'<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+                b'xmlns:xmp="http://ns.adobe.com/xap/1.0/"><rdf:RDF>'
+                b'<rdf:Description rdf:about="" xmp:Label="Green" xmp:Rating="3"/>'
+                b'</rdf:RDF></x:xmpmeta>'
+            )
+            sidecar.write_bytes(original)
+            writer = XmpWriter(CFG)
+            self.assertFalse(writer.clear_label(self._photo(photo_path, ".cr3"), "red"))
+            self.assertEqual(sidecar.read_bytes(), original)
+
+    def test_embedded_jpeg_preserves_non_label_xmp_verbatim(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.jpg"
+            Image.new("RGB", (48, 32), (12, 34, 56)).save(photo_path, "JPEG")
+            writer = XmpWriter(CFG)
+            p = self._photo(photo_path, ".jpg")
+            writer.write(p, "red")
+            data = photo_path.read_bytes()
+            payload = _find_standard_xmp_payload(data)
+            self.assertIsNotNone(payload)
+            # Add Camera Raw settings and a rating without using the writer.
+            payload2 = payload.replace(
+                b'xmp:Label="Select"',
+                b'xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/" '
+                b'crs:Exposure2012="0.80" xmp:Rating="4" xmp:Label="Select"',
+            )
+            from app.xmp.writer import _jpeg_xmp_segment, _replace_or_insert_standard_xmp
+            photo_path.write_bytes(_replace_or_insert_standard_xmp(data, _jpeg_xmp_segment(payload2, photo_path)))
+            before = _find_standard_xmp_payload(photo_path.read_bytes())
+            self.assertTrue(writer.clear_label(p, "red"))
+            after = _find_standard_xmp_payload(photo_path.read_bytes())
+            self.assertEqual(after, before.replace(b' xmp:Label="Select"', b""))
+            self.assertIn(b'crs:Exposure2012="0.80"', after)
+            self.assertIn(b'xmp:Rating="4"', after)
+
+    @staticmethod
+    def _classic_tiff_with_xmp(packet: bytes) -> bytes:
+        # Minimal little-endian TIFF container with one IFD entry: tag 700 XMP.
+        ifd_offset = 8
+        data_offset = 8 + 2 + 12 + 4
+        entry = (
+            (700).to_bytes(2, "little")
+            + (1).to_bytes(2, "little")
+            + len(packet).to_bytes(4, "little")
+            + data_offset.to_bytes(4, "little")
+        )
+        return b"II*\x00" + ifd_offset.to_bytes(4, "little") + b"\x01\x00" + entry + b"\x00\x00\x00\x00" + packet
+
+    def test_embedded_dng_xmp_clear_preserves_file_size_and_other_fields(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.dng"
+            packet = (
+                b'<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+                b'xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">'
+                b'<rdf:RDF><rdf:Description crs:Exposure2012="1.10" xmp:Rating="5" xmp:Label="Select"/>'
+                b'</rdf:RDF></x:xmpmeta>' + b" " * 128
+            )
+            photo_path.write_bytes(self._classic_tiff_with_xmp(packet))
+            before_size = photo_path.stat().st_size
+            writer = XmpWriter(CFG)
+            self.assertTrue(writer.clear_label(self._photo(photo_path, ".dng"), "red"))
+            self.assertEqual(photo_path.stat().st_size, before_size)
+            from app.xmp.writer import _find_tiff_xmp_region
+            offset, size = _find_tiff_xmp_region(photo_path)
+            with photo_path.open("rb") as fh:
+                fh.seek(offset)
+                after = fh.read(size)
+            self.assertNotIn(b'xmp:Label="Select"', after)
+            self.assertIn(b'crs:Exposure2012="1.10"', after)
+            self.assertIn(b'xmp:Rating="5"', after)
+
+    def test_embedded_dng_existing_xmp_label_is_updated_in_place(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.dng"
+            packet = (
+                b'<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+                b'xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">'
+                b'<rdf:RDF><rdf:Description crs:Texture="22" xmp:Label="Second"/></rdf:RDF></x:xmpmeta>'
+                + b" " * 256
+            )
+            original_file = self._classic_tiff_with_xmp(packet)
+            photo_path.write_bytes(original_file)
+            writer = XmpWriter(CFG)
+            result = writer.write(self._photo(photo_path, ".dng"), "red")
+            self.assertEqual(result, photo_path)
+            self.assertEqual(photo_path.stat().st_size, len(original_file))
+            from app.xmp.writer import _find_tiff_xmp_region
+            offset, size = _find_tiff_xmp_region(photo_path)
+            with photo_path.open("rb") as fh:
+                fh.seek(offset)
+                after = fh.read(size)
+            self.assertIn(b'xmp:Label="Select"', after)
+            self.assertNotIn(b'xmp:Label="Second"', after)
+            self.assertIn(b'crs:Texture="22"', after)
+            self.assertFalse(photo_path.with_suffix(".xmp").exists())
+
+    def test_embedded_dng_without_room_falls_back_to_sidecar(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.dng"
+            packet = (
+                b'<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+                b'<rdf:RDF><rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta>'
+            )
+            original = self._classic_tiff_with_xmp(packet)
+            photo_path.write_bytes(original)
+            result = XmpWriter(CFG).write(self._photo(photo_path, ".dng"), "red")
+            self.assertEqual(result, photo_path.with_suffix(".xmp"))
+            self.assertEqual(photo_path.read_bytes(), original)
+            self.assertTrue(photo_path.with_suffix(".xmp").exists())
+
+    @staticmethod
+    def _minimal_psd_with_xmp(packet: bytes) -> bytes:
+        header = (
+            b"8BPS" + (1).to_bytes(2, "big") + b"\x00" * 6
+            + (3).to_bytes(2, "big") + (1).to_bytes(4, "big")
+            + (1).to_bytes(4, "big") + (8).to_bytes(2, "big")
+            + (3).to_bytes(2, "big")
+        )
+        name = b"\x00\x00"  # empty Pascal string + even padding
+        resource = (
+            b"8BIM" + (1060).to_bytes(2, "big") + name
+            + len(packet).to_bytes(4, "big") + packet
+            + (b"\x00" if len(packet) % 2 else b"")
+        )
+        # Color-mode data length 0; then image-resource section; trailing bytes
+        # stand in for later PSD sections and must remain untouched.
+        return header + (0).to_bytes(4, "big") + len(resource).to_bytes(4, "big") + resource + b"TRAILING-PSD-DATA"
+
+    def test_embedded_psd_xmp_clear_keeps_other_metadata_and_container_size(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.psd"
+            packet = (
+                b'<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+                b'xmlns:xmp="http://ns.adobe.com/xap/1.0/" xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/">'
+                b'<rdf:RDF><rdf:Description photoshop:Headline="Class 4A" xmp:Rating="2" xmp:Label="Select"/>'
+                b'</rdf:RDF></x:xmpmeta>' + b" " * 96
+            )
+            original = self._minimal_psd_with_xmp(packet)
+            photo_path.write_bytes(original)
+            writer = XmpWriter(CFG)
+            self.assertTrue(writer.clear_label(self._photo(photo_path, ".psd"), "red"))
+            updated_file = photo_path.read_bytes()
+            self.assertEqual(len(updated_file), len(original))
+            self.assertTrue(updated_file.endswith(b"TRAILING-PSD-DATA"))
+            from app.xmp.writer import _find_psd_xmp_region
+            offset, size = _find_psd_xmp_region(photo_path)
+            after = updated_file[offset:offset + size]
+            self.assertNotIn(b'xmp:Label="Select"', after)
+            self.assertIn(b'photoshop:Headline="Class 4A"', after)
+            self.assertIn(b'xmp:Rating="2"', after)
+
+    def test_embedded_dng_can_add_label_using_existing_padding(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.dng"
+            packet = (
+                b'<?xpacket begin="\xef\xbb\xbf" id="a"?>\n'
+                b'<x:xmpmeta xmlns:x="adobe:ns:meta/" xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+                b'xmlns:xmp="http://ns.adobe.com/xap/1.0/"><rdf:RDF>'
+                b'<rdf:Description rdf:about="" xmp:Rating="5"/></rdf:RDF></x:xmpmeta>'
+                + b" " * 160 + b'<?xpacket end="w"?>'
+            )
+            original = self._classic_tiff_with_xmp(packet)
+            photo_path.write_bytes(original)
+            result = XmpWriter(CFG).write(self._photo(photo_path, ".dng"), "red")
+            self.assertEqual(result, photo_path)
+            self.assertEqual(photo_path.stat().st_size, len(original))
+            from app.xmp.writer import _find_tiff_xmp_region
+            offset, size = _find_tiff_xmp_region(photo_path)
+            data = photo_path.read_bytes()[offset:offset + size]
+            self.assertIn(b'xmp:Label="Select"', data)
+            self.assertIn(b'xmp:Rating="5"', data)
+            self.assertFalse(photo_path.with_suffix(".xmp").exists())

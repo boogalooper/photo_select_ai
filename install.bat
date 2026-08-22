@@ -15,7 +15,7 @@ if exist "config\ca-bundle.pem" (
 )
 
 echo ==============================================
-echo Photo Select AI - installation v0.5.2 Portrait + Groups
+echo Photo Select AI - installation v0.5.3 Portrait + Groups
 echo ==============================================
 echo.
 echo Connection mode for Python packages:

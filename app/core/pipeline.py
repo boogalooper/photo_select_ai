@@ -76,7 +76,7 @@ class AnalysisPipeline:
         self._progress_callback(value, str(message))
 
     def _preview_workers(self) -> int:
-        """Number of CPU workers used only for bounded preview prefetch.
+        """Number of CPU workers used for metadata I/O and preview prefetch.
 
         InsightFace inference itself remains serialized on one analyzer/GPU.
         The worker threads overlap file I/O, RAW/JPEG decoding, EXIF rotation
@@ -87,6 +87,71 @@ class AnalysisPipeline:
         except (TypeError, ValueError):
             value = 2
         return max(1, min(8, value))
+
+    def _clear_old_labels(self, photos, writer, clear_red: bool, clear_yellow: bool, stats) -> None:
+        """Clear old labels concurrently without racing on a shared sidecar.
+
+        One worker owns the complete embedded-XMP + sidecar operation for a
+        photo. Files with the same directory/stem (for example IMG_0001.CR3
+        and IMG_0001.JPG) share one lock because they may also share
+        IMG_0001.xmp. Independent stems can be processed in parallel.
+        """
+        photos = list(photos)
+        total = len(photos)
+        if not total:
+            return
+        workers = min(self._preview_workers(), total)
+        locks: dict[str, threading.Lock] = {}
+        locks_guard = threading.Lock()
+
+        def resource_lock(photo):
+            key = str(photo.path.with_suffix("")).casefold()
+            with locks_guard:
+                return locks.setdefault(key, threading.Lock())
+
+        def clear_one(photo):
+            if self.cancel_event.is_set():
+                return photo, False, None
+            try:
+                with resource_lock(photo):
+                    if self.cancel_event.is_set():
+                        return photo, False, None
+                    changed = False
+                    if clear_red:
+                        changed = writer.clear_label(photo, "red") or changed
+                    if clear_yellow:
+                        changed = writer.clear_label(photo, "yellow") or changed
+                return photo, changed, None
+            except Exception as exc:
+                return photo, False, exc
+
+        if workers <= 1:
+            results = (clear_one(photo) for photo in photos)
+            executor = None
+        else:
+            self.message(f"Подготовка меток: параллельных задач {workers}.")
+            executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="photo-xmp")
+            futures = [executor.submit(clear_one, photo) for photo in photos]
+            results = (future.result() for future in as_completed(futures))
+
+        completed = 0
+        try:
+            for photo, changed, error in results:
+                self._check_cancelled()
+                completed += 1
+                if changed:
+                    stats.labels_cleared_before_run += 1
+                if error is not None:
+                    self.log.error(
+                        "Failed to clear existing labels from %s: %s",
+                        photo.path, error, exc_info=(type(error), error, error.__traceback__),
+                    )
+                self.progress(2.0 + 5.0 * completed / total, f"Подготовка меток {completed}/{total}")
+        finally:
+            if executor is not None:
+                for future in futures:
+                    future.cancel()
+                executor.shutdown(wait=True, cancel_futures=True)
 
     def _iter_loaded_previews(self, jobs, long_edge: int, fallback_half: bool):
         """Yield ``(payload, rgb, error)`` in input order with bounded prefetch.
@@ -339,20 +404,7 @@ class AnalysisPipeline:
             )
             if clear_red or clear_yellow:
                 self.message("Снятие старых меток этого профиля...")
-                total_clear = max(1, len(photos))
-                for clear_idx, photo in enumerate(photos, start=1):
-                    self._check_cancelled()
-                    try:
-                        changed = False
-                        if clear_red:
-                            changed = writer.clear_label(photo, "red") or changed
-                        if clear_yellow:
-                            changed = writer.clear_label(photo, "yellow") or changed
-                        if changed:
-                            stats.labels_cleared_before_run += 1
-                    except Exception:
-                        self.log.exception("Failed to clear existing labels from %s", photo.path)
-                    self.progress(2.0 + 5.0 * clear_idx / total_clear, f"Подготовка меток {clear_idx}/{len(photos)}")
+                self._clear_old_labels(photos, writer, clear_red, clear_yellow, stats)
 
             analyzers, backend_name = self._create_analyzer_pool(self.config, "Основной анализ")
             self.message(f"Распознавание лиц: {backend_name}")

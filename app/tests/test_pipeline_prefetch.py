@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -47,6 +49,49 @@ def test_preview_prefetch_decode_error_does_not_stop_following_files(monkeypatch
     assert result[0][2] is None
     assert isinstance(result[1][2], OSError)
     assert result[2][2] is None
+
+
+def test_label_preparation_processes_independent_files_in_parallel():
+    barrier = threading.Barrier(2)
+    threads: list[str] = []
+
+    class Writer:
+        def clear_label(self, photo, role):
+            threads.append(threading.current_thread().name)
+            if role == "red":
+                barrier.wait(timeout=2.0)
+            return True
+
+    stats = SimpleNamespace(labels_cleared_before_run=0)
+    photos = [_FakePhoto("a.jpg"), _FakePhoto("b.jpg")]
+    _pipeline(2)._clear_old_labels(photos, Writer(), True, False, stats)
+
+    assert stats.labels_cleared_before_run == 2
+    assert len(set(threads)) == 2
+    assert all(name.startswith("photo-xmp") for name in threads)
+
+
+def test_label_preparation_serializes_files_that_share_one_sidecar():
+    state_lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    class Writer:
+        def clear_label(self, photo, role):
+            nonlocal active, maximum_active
+            with state_lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.03)
+            with state_lock:
+                active -= 1
+            return False
+
+    stats = SimpleNamespace(labels_cleared_before_run=0)
+    photos = [_FakePhoto("same.jpg"), _FakePhoto("same.cr3")]
+    _pipeline(2)._clear_old_labels(photos, Writer(), True, False, stats)
+
+    assert maximum_active == 1
 
 
 class _FakePhoto:
