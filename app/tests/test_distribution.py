@@ -23,7 +23,43 @@ def test_portable_functionality_is_fully_removed():
     assert "pyinstaller" not in combined
 
 
-def test_root_launcher_uses_local_venv():
+def test_root_launcher_uses_private_local_python_without_silent_reinstall():
     run_bat = (ROOT / "run.bat").read_text(encoding="utf-8")
+    install = (ROOT / "install.bat").read_text(encoding="utf-8")
     assert "runtime\\venv\\Scripts\\python.exe" in run_bat
-    assert "call install.bat" in run_bat
+    assert "call install.bat" not in run_bat.lower()
+    assert "repair_venv.ps1" in run_bat
+    assert "install_managed_python.ps1" in install
+    assert "winget install" not in install.lower()
+    assert "py -3.11" not in install.lower()
+    assert (ROOT / "app" / "tools" / "repair_venv.ps1").is_file()
+    assert (ROOT / "app" / "tools" / "install_managed_python.ps1").is_file()
+
+
+def test_private_venv_is_relocatable_and_move_repair_preserves_packages():
+    installer = (ROOT / "app" / "tools" / "install_managed_python.ps1").read_text(encoding="utf-8-sig")
+    repair = (ROOT / "app" / "tools" / "repair_venv.ps1").read_text(encoding="utf-8-sig")
+    assert "--relocatable" in installer
+    assert "--relocatable" in repair
+    assert "--allow-existing" in repair
+    assert "--no-python-downloads" in repair
+    assert "Move-Item -LiteralPath $tmp" not in repair
+
+
+def test_relocatable_validation_does_not_require_absolute_home_metadata():
+    installer = (ROOT / "app" / "tools" / "install_managed_python.ps1").read_text(encoding="utf-8-sig")
+    repair = (ROOT / "app" / "tools" / "repair_venv.ps1").read_text(encoding="utf-8-sig")
+    for script in (installer, repair):
+        assert "sys.base_prefix" in script
+        assert "APP_EXPECTED_BASE" in script
+        assert "$HomeMoved" not in script
+        assert "$venvHome" not in script
+    assert "Split-Path -Parent $base" in installer
+
+
+def test_fresh_venv_bootstraps_pip_with_uv_not_with_missing_pip():
+    helper = (ROOT / "app" / "tools" / "install_windows.ps1").read_text(encoding="utf-8-sig")
+    assert "runtime\\uv\\uv.exe" in helper
+    assert "pip install --python $Python --no-index" in helper
+    assert "& $Python -m pip install" not in helper
+    assert "& $Python -m pip --version" in helper

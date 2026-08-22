@@ -192,7 +192,7 @@ PORTRAIT_REPEAT_CODES = {value: label for label, value in PORTRAIT_REPEAT_MODES.
 class MainWindow(tk.Tk):
     def __init__(self, config: dict, initial_folder: str | None = None):
         super().__init__()
-        self.title("Photo Select AI v0.5.3 — портреты и группы")
+        self.title("Photo Select AI v0.5.4 — портреты и группы")
         # Group quick-start has two additional option rows.  Use a taller
         # default on normal desktop displays, but never force the window beyond
         # the usable height of a smaller screen.

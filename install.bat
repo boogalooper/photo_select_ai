@@ -1,12 +1,11 @@
 @echo off
-setlocal EnableExtensions EnableDelayedExpansion
+setlocal EnableExtensions DisableDelayedExpansion
 cd /d "%~dp0"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 set "PIP_DISABLE_PIP_VERSION_CHECK=1"
 set "PHOTOSELECT_PIP_INSECURE_PYPI=0"
 
-rem Optional explicit CA bundle for unusual environments.
 if exist "config\ca-bundle.pem" (
   set "PIP_CERT=%CD%\config\ca-bundle.pem"
   set "REQUESTS_CA_BUNDLE=%CD%\config\ca-bundle.pem"
@@ -15,7 +14,9 @@ if exist "config\ca-bundle.pem" (
 )
 
 echo ==============================================
-echo Photo Select AI - installation v0.5.3 Portrait + Groups
+echo Photo Select AI - installation v0.5.8
+echo Private Python: CPython 3.11.16 x64 via uv
+echo System Python and winget are not used.
 echo ==============================================
 echo.
 echo Connection mode for Python packages:
@@ -31,8 +32,6 @@ if errorlevel 2 (
   set "PHOTOSELECT_PIP_INSECURE_PYPI=1"
   echo.
   echo WARNING: PyPI certificate verification bypass is enabled for this install.
-  echo PowerShell downloads and model hash verification remain secure.
-  echo Use this mode only on a network you trust.
   echo.
 ) else (
   echo.
@@ -40,50 +39,26 @@ if errorlevel 2 (
   echo.
 )
 
-where powershell.exe >nul 2>nul
-if errorlevel 1 (
-  echo ERROR: Windows PowerShell was not found.
-  echo Photo Select AI installer requires powershell.exe on Windows.
+set "POWERSHELL_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if defined PROCESSOR_ARCHITEW6432 if exist "%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe" set "POWERSHELL_EXE=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%POWERSHELL_EXE%" set "POWERSHELL_EXE=powershell.exe"
+
+if not exist "app\tools\install_managed_python.ps1" (
+  echo ERROR: app\tools\install_managed_python.ps1 is missing.
+  goto :install_failed
+)
+if not exist "app\tools\repair_venv.ps1" (
+  echo ERROR: app\tools\repair_venv.ps1 is missing.
   goto :install_failed
 )
 
-if exist "runtime\venv\Scripts\python.exe" (
-  echo Checking existing virtual environment...
-  "runtime\venv\Scripts\python.exe" -c "import sys,pathlib; expected=pathlib.Path(r'%CD%\runtime\venv').resolve(); actual=pathlib.Path(sys.prefix).resolve(); assert sys.version_info[:2] == (3,11); assert actual == expected, (actual, expected)" >nul 2>nul
-  if not errorlevel 1 goto :have_venv
-  echo Existing runtime\venv is not valid at this location or on this computer.
-  echo Recreating the virtual environment...
-  rmdir /s /q "runtime\venv"
-)
-
-set "BASEPY="
-py -3.11 -c "import sys; print(sys.executable)" >nul 2>nul
-if not errorlevel 1 set "BASEPY=py -3.11"
-
-if not defined BASEPY (
-  python -c "import sys; assert sys.version_info[:2] == (3,11)" >nul 2>nul
-  if not errorlevel 1 set "BASEPY=python"
-)
-
-if not defined BASEPY (
-  where winget >nul 2>nul
-  if errorlevel 1 (
-    echo Python 3.11 was not found and winget is unavailable.
-    echo Install Python 3.11 x64 and rerun install.bat.
-    goto :install_failed
-  )
-  echo Installing Python 3.11 using winget...
-  winget install --id Python.Python.3.11 -e --silent --accept-package-agreements --accept-source-agreements
-  if errorlevel 1 goto :install_failed
-  set "BASEPY=py -3.11"
-)
-
-echo Creating virtual environment...
-%BASEPY% -m venv "runtime\venv"
+echo.
+echo Preparing private Python. No system Python is required...
+"%POWERSHELL_EXE%" -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0app\tools\install_managed_python.ps1"
 if errorlevel 1 goto :install_failed
 
-:have_venv
 set "PY=runtime\venv\Scripts\python.exe"
+if not exist "%PY%" goto :install_failed
 
 rem Remove obsolete v0.1/v0.2.1 MediaPipe artifacts. This is intentionally
 rem repeated on upgrades so an existing venv/project is cleaned too.
@@ -94,7 +69,7 @@ if exist "runtime\downloads\face_landmarker.task" del /q "runtime\downloads\face
 rem Bootstrap is always downloaded by PowerShell through the Windows TLS stack.
 echo.
 echo Bootstrapping pip/setuptools/packaging/wheel through Windows PowerShell...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "app\tools\install_windows.ps1" -Action bootstrap-pip -Python "%CD%\%PY%"
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "app\tools\install_windows.ps1" -Action bootstrap-pip -Python "%CD%\%PY%"
 if errorlevel 1 goto :install_failed
 
 :install_dependencies
@@ -159,7 +134,7 @@ if exist "models\insightface\models\buffalo_l\det_10g.onnx" if exist "models\ins
 
 echo.
 echo Downloading/verifying InsightFace buffalo_l through Windows PowerShell...
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "app\tools\install_windows.ps1" -Action download-insightface
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "app\tools\install_windows.ps1" -Action download-insightface
 if errorlevel 1 goto :install_failed
 
 :models_ready
@@ -184,7 +159,7 @@ goto :install_complete
 :install_complete
 echo.
 echo ==============================================
-echo Installation complete - Portrait + Groups CUDA build.
+echo Installation complete - private CPython 3.11.16 environment ready.
 echo ==============================================
 if "%PHOTOSELECT_PIP_INSECURE_PYPI%"=="1" (
   echo Python package downloads used PyPI compatibility mode.
@@ -199,8 +174,8 @@ echo CUDA 12.8 runtime components are pinned and Windows DLL paths are configure
 echo.
 echo Use run.bat or: run.bat "D:\Photos\Shoot"
 echo.
-echo To move Photo Select AI to another computer, copy the project folder and run install.bat there.
-echo The runtime\venv folder is machine-specific and should be recreated on the target computer.
+echo The project folder can be renamed or moved.
+echo On another computer, run install.bat once if Windows-specific drivers/runtime need validation.
 echo.
 echo Press any key to close this installer...
 pause >nul

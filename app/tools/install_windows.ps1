@@ -132,22 +132,19 @@ function Bootstrap-Pip {
         $downloaded[$package] = $destination
     }
 
-    # Upgrade pip alone first. --no-deps is intentional: pip itself does not
-    # need the other bootstrap packages, and this avoids asking the old pip
-    # resolver to solve wheel's dependencies.
-    Write-Host "Installing pip locally (--no-index)..."
-    $pipWheel = $downloaded["pip"]
-    & $Python -m pip install --disable-pip-version-check --no-index --upgrade --no-deps $pipWheel
-    if ($LASTEXITCODE -ne 0) {
-        throw "Local pip upgrade failed with exit code $LASTEXITCODE"
+    # A fresh `uv venv` intentionally does not require pip to be present.
+    # Bootstrap pip itself with uv, using only the SHA-256 verified wheels
+    # downloaded above. This avoids the impossible `python -m pip install pip`
+    # cycle when pip is not installed yet.
+    $uvExe = Join-Path $Root "runtime\uv\uv.exe"
+    if (-not (Test-Path -LiteralPath $uvExe -PathType Leaf)) {
+        throw "Local uv executable not found: $uvExe"
     }
 
-    # Now let the upgraded pip resolve setuptools/wheel entirely from the
-    # verified local directory. packaging is present there for wheel>=0.48.
-    Write-Host "Installing setuptools/packaging/wheel locally (--no-index)..."
-    & $Python -m pip install --disable-pip-version-check --no-index --find-links $BootstrapDir --upgrade setuptools packaging wheel
+    Write-Host "Installing pip/setuptools/packaging/wheel locally with uv (--no-index)..."
+    & $uvExe pip install --python $Python --no-index --find-links $BootstrapDir --upgrade pip setuptools packaging wheel
     if ($LASTEXITCODE -ne 0) {
-        throw "Local bootstrap package installation failed with exit code $LASTEXITCODE"
+        throw "Local bootstrap package installation through uv failed with exit code $LASTEXITCODE"
     }
 
     Write-Host "Bootstrap complete:"
