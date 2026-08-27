@@ -7,6 +7,7 @@ from statistics import median
 from typing import Callable
 
 from app.analysis.matching import cosine_similarity
+from app.core.constants import GROUP_YELLOW_DEFAULT_MAX, GROUP_YELLOW_MAX_LIMIT
 from app.core.models import FaceAssessment, FrameAssessment, Selection
 
 
@@ -1124,7 +1125,7 @@ def select_group_series(
 
     extras: list[Selection] = []
     if bool(cfg.get("find_headswap_candidates", True)):
-        max_extra = max(0, min(5, int(cfg.get("max_extra_candidates", 2))))
+        max_extra = max(0, min(GROUP_YELLOW_MAX_LIMIT, int(cfg.get("max_extra_candidates", GROUP_YELLOW_DEFAULT_MAX))))
         remaining = dict(problems)
         chosen_frames = {best_idx}
 

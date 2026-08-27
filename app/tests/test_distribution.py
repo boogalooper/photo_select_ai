@@ -63,3 +63,13 @@ def test_fresh_venv_bootstraps_pip_with_uv_not_with_missing_pip():
     assert "pip install --python $Python --no-index" in helper
     assert "& $Python -m pip install" not in helper
     assert "& $Python -m pip --version" in helper
+
+
+def test_group_yellow_default_and_absolute_limit_are_consistent():
+    import json
+    from app.core.constants import GROUP_YELLOW_DEFAULT_MAX, GROUP_YELLOW_MAX_LIMIT
+
+    config = json.loads((ROOT / "config" / "default.json").read_text(encoding="utf-8"))
+    assert GROUP_YELLOW_DEFAULT_MAX == 2
+    assert GROUP_YELLOW_MAX_LIMIT == 5
+    assert config["group"]["max_extra_candidates"] == GROUP_YELLOW_DEFAULT_MAX

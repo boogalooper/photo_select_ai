@@ -511,3 +511,51 @@ def test_group_block_merge_reports_progress_to_completion():
     assert values[0] == 0.0
     assert values[-1] == 1.0
     assert any("соседних блоков" in m for _p, m in events)
+
+
+def test_group_can_return_five_targeted_yellow_candidates():
+    """The configured Group cap of five must be honoured end-to-end by selection."""
+    from copy import deepcopy
+
+    start = datetime(2026, 1, 1, 20, 0, 0)
+    people = 6
+    main = frame(0, [0.95] * people, start)
+    # Keep the main frame strongest overall, but give five different children
+    # closed eyes so each can require its own unique replacement frame.
+    for child in range(5):
+        main.faces[child].eye_open_left = 0.20
+        main.faces[child].eye_open_right = 0.20
+        main.faces[child].eye_sharpness = 0.90
+
+    frames = [main]
+    for candidate_no in range(5):
+        candidate = frame(candidate_no + 1, [0.60] * people, start)
+        for child in range(5):
+            candidate.faces[child].eye_open_left = 0.25
+            candidate.faces[child].eye_open_right = 0.25
+            candidate.faces[child].eye_sharpness = 0.90
+        candidate.faces[candidate_no].eye_open_left = 0.90
+        candidate.faces[candidate_no].eye_open_right = 0.90
+        frames.append(candidate)
+
+    cfg = deepcopy(CFG)
+    cfg["group"].update({
+        "track_max_frame_gap": 10,
+        "prioritize_open_eyes_main": False,
+        "max_extra_candidates": 5,
+        "min_extra_candidates": 0,
+        "eye_problem_threshold": 0.58,
+        "eye_candidate_threshold": 0.64,
+        "eye_improvement_margin": 0.08,
+        "headswap_min_eye_sharpness": 0.35,
+    })
+
+    result, diag = select_group_series(frames, cfg)
+    assert result.main is not None
+    assert result.main.photo.path.name == "IMG_0000.jpg"
+    assert len(result.extras) == 5
+    assert [item.photo.path.name for item in result.extras] == [
+        "IMG_0001.jpg", "IMG_0002.jpg", "IMG_0003.jpg", "IMG_0004.jpg", "IMG_0005.jpg"
+    ]
+    assert diag.covered_problems == 5
+    assert diag.unresolved_problems == 0

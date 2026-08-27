@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 from app.paths import ROOT
 LOG_PATH = ROOT / "logs" / "photo_select_ai.log"

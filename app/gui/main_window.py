@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app import __version__
+
 import queue
 import threading
 import tkinter as tk
@@ -7,6 +9,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from app.core.config import load_ui_state, merged_config, save_ui_state
+from app.core.constants import GROUP_YELLOW_DEFAULT_MAX, GROUP_YELLOW_MAX_LIMIT
 from app.core.pipeline import AnalysisPipeline, CancelledError
 from app.core.scanner import count_supported_photos
 from app.gui.tooltip import ToolTip
@@ -150,7 +153,7 @@ GROUP_RULE_PROFILES: dict[str, dict[str, float | int | bool]] = {
         "backup_min_score_ratio": 0.86,
         "backup_person_improvement_margin": 0.05,
         "min_extra_candidates": 1,
-        "max_extra_candidates": 2,
+        "max_extra_candidates": GROUP_YELLOW_DEFAULT_MAX,
     },
     "Сбалансированный": {
         "prioritize_open_eyes_main": True,
@@ -164,7 +167,7 @@ GROUP_RULE_PROFILES: dict[str, dict[str, float | int | bool]] = {
         "backup_min_score_ratio": 0.88,
         "backup_person_improvement_margin": 0.06,
         "min_extra_candidates": 1,
-        "max_extra_candidates": 2,
+        "max_extra_candidates": GROUP_YELLOW_DEFAULT_MAX,
     },
     "Больше резервных кадров": {
         "prioritize_open_eyes_main": True,
@@ -178,7 +181,7 @@ GROUP_RULE_PROFILES: dict[str, dict[str, float | int | bool]] = {
         "backup_min_score_ratio": 0.80,
         "backup_person_improvement_margin": 0.04,
         "min_extra_candidates": 2,
-        "max_extra_candidates": 5,
+        "max_extra_candidates": GROUP_YELLOW_MAX_LIMIT,
     },
 }
 GROUP_PROFILE_DEFAULT = "Глаза прежде всего"
@@ -192,7 +195,7 @@ PORTRAIT_REPEAT_CODES = {value: label for label, value in PORTRAIT_REPEAT_MODES.
 class MainWindow(tk.Tk):
     def __init__(self, config: dict, initial_folder: str | None = None):
         super().__init__()
-        self.title("Photo Select AI v0.5.5 — портреты и группы")
+        self.title(f"Photo Select AI v{__version__} — портреты и группы")
         # Group quick-start has two additional option rows.  Use a taller
         # default on normal desktop displays, but never force the window beyond
         # the usable height of a smaller screen.
@@ -255,7 +258,7 @@ class MainWindow(tk.Tk):
         self.clear_red_var = tk.BooleanVar(value=bool(saved("clear_red_before_run", config["xmp"].get("clear_red_before_run", True))))
         self.clear_yellow_var = tk.BooleanVar(value=bool(saved("clear_yellow_before_run", config["xmp"].get("clear_yellow_before_run", True))))
         self.group_find_candidates_var = tk.BooleanVar(value=bool(saved("group_find_candidates", config.get("group", {}).get("find_headswap_candidates", True))))
-        self.group_max_extra_var = tk.IntVar(value=int(saved("group_max_extra", config.get("group", {}).get("max_extra_candidates", 2))))
+        self.group_max_extra_var = tk.IntVar(value=int(saved("group_max_extra", config.get("group", {}).get("max_extra_candidates", GROUP_YELLOW_DEFAULT_MAX))))
         self.group_min_extra_var = tk.IntVar(value=int(saved("group_min_extra", config.get("group", {}).get("min_extra_candidates", 1))))
         self.group_min_people_var = tk.IntVar(value=int(saved("group_min_people", config.get("group", {}).get("min_people", 4))))
         self.group_highres_rescue_var = tk.BooleanVar(value=bool(saved("group_highres_rescue", config.get("group", {}).get("highres_rescue_enabled", False))))
@@ -1329,7 +1332,7 @@ class MainWindow(tk.Tk):
         if not profile:
             return
         self.group_min_extra_var.set(int(profile.get("min_extra_candidates", 1)))
-        self.group_max_extra_var.set(int(profile.get("max_extra_candidates", 2)))
+        self.group_max_extra_var.set(int(profile.get("max_extra_candidates", GROUP_YELLOW_DEFAULT_MAX)))
         self.group_find_candidates_var.set(True)
         self._update_profile_descriptions()
         self._apply_context_states()
@@ -1451,9 +1454,9 @@ class MainWindow(tk.Tk):
                 raise ValueError("preview")
             if self.mode_var.get() == "group" and not 2 <= int(self.group_min_people_var.get()) <= 80:
                 raise ValueError("min_people")
-            if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and not 0 <= int(self.group_max_extra_var.get()) <= 5:
+            if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and not 0 <= int(self.group_max_extra_var.get()) <= GROUP_YELLOW_MAX_LIMIT:
                 raise ValueError("max_extra")
-            if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and not 0 <= int(self.group_min_extra_var.get()) <= 5:
+            if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and not 0 <= int(self.group_min_extra_var.get()) <= GROUP_YELLOW_MAX_LIMIT:
                 raise ValueError("min_extra")
             if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and int(self.group_min_extra_var.get()) > int(self.group_max_extra_var.get()):
                 raise ValueError("extra_order")
@@ -1465,9 +1468,9 @@ class MainWindow(tk.Tk):
             elif key == 'min_people':
                 msg = 'Мин. детей в группе должен быть в диапазоне 2–80.'
             elif key == 'max_extra':
-                msg = 'YELLOW максимум должен быть в диапазоне 0–5.'
+                msg = f'YELLOW максимум должен быть в диапазоне 0–{GROUP_YELLOW_MAX_LIMIT}.'
             elif key == 'min_extra':
-                msg = 'YELLOW минимум должен быть в диапазоне 0–5.'
+                msg = f'YELLOW минимум должен быть в диапазоне 0–{GROUP_YELLOW_MAX_LIMIT}.'
             else:
                 msg = 'YELLOW минимум не может быть больше YELLOW максимум.'
             messagebox.showerror("Некорректная настройка", msg)
@@ -1845,7 +1848,7 @@ class MainWindow(tk.Tk):
             self.group_camera_attention_away_penalty_var.set(float(c.get("group", {}).get("camera_attention_away_penalty", 0.45)))
             self.group_profile_var.set(GROUP_PROFILE_DEFAULT)
             self.group_min_extra_var.set(int(GROUP_RULE_PROFILES[GROUP_PROFILE_DEFAULT].get("min_extra_candidates", 1)))
-            self.group_max_extra_var.set(int(GROUP_RULE_PROFILES[GROUP_PROFILE_DEFAULT].get("max_extra_candidates", 2)))
+            self.group_max_extra_var.set(int(GROUP_RULE_PROFILES[GROUP_PROFILE_DEFAULT].get("max_extra_candidates", GROUP_YELLOW_DEFAULT_MAX)))
             self.group_find_candidates_var.set(bool(c.get("group", {}).get("find_headswap_candidates", True)))
             self.clear_red_var.set(bool(c["xmp"].get("clear_red_before_run", True)))
             self.clear_yellow_var.set(bool(c["xmp"].get("clear_yellow_before_run", True)))

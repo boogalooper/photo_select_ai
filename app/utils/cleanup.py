@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
 
 from app.paths import ROOT
 TEMP_PREVIEWS = ROOT / "temp" / "previews"

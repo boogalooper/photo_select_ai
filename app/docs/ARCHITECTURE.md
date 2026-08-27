@@ -1,4 +1,4 @@
-# Photo Select AI v0.5.5 — portrait + group selection
+# Photo Select AI — portrait + group selection
 
 Current build supports independent Portrait and Group workflows.
 
