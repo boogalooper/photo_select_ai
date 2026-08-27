@@ -183,6 +183,7 @@
     "eye_severe_margin": 0.12,
     "eye_adaptive_min_samples": 3,
     "cross_block_sequence_merge_gap": 40,
+    "cross_block_sequence_recovery_seconds": 90.0,
     "promote_singleton_tracks": false,
     "singleton_det_thresh": 0.22,
     "singleton_min_size_ratio": 0.38,
