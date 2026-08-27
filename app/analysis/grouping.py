@@ -1124,7 +1124,7 @@ def select_group_series(
 
     extras: list[Selection] = []
     if bool(cfg.get("find_headswap_candidates", True)):
-        max_extra = max(0, min(3, int(cfg.get("max_extra_candidates", 3))))
+        max_extra = max(0, min(5, int(cfg.get("max_extra_candidates", 2))))
         remaining = dict(problems)
         chosen_frames = {best_idx}
 
@@ -1551,15 +1551,6 @@ def merge_adjacent_group_blocks(
     cfg = config.get("group", {})
     max_seconds = max(0.0, float(cfg.get("cross_block_merge_seconds", 45.0)))
     max_sequence_gap = max(0, int(cfg.get("cross_block_sequence_merge_gap", 40)))
-    # Filename order may repair moderately scrambled/missing EXIF timestamps,
-    # but it must not override an arbitrarily large real pause. Adjacent camera
-    # numbers commonly straddle two different photographed groups. The old
-    # unlimited override could therefore absorb the first group into the next
-    # one (for example IMG_6156 -> IMG_6157 across a 140 s pause).
-    sequence_recovery_seconds = max(
-        max_seconds,
-        float(cfg.get("cross_block_sequence_recovery_seconds", 90.0)),
-    )
     min_overlap = max(0.0, min(1.0, float(cfg.get("cross_block_min_identity_overlap", 0.75))))
     max_distance = max(0.05, min(0.60, float(cfg.get("cross_block_face_distance", 0.24))))
 
@@ -1581,11 +1572,7 @@ def merge_adjacent_group_blocks(
         raw_time_delta = (current[0].photo.capture_time - previous[-1].photo.capture_time).total_seconds()
         time_gap = abs(raw_time_delta)
         sequence_gap = _block_sequence_gap(previous, current)
-        sequence_close = (
-            sequence_gap is not None
-            and sequence_gap <= max_sequence_gap
-            and time_gap <= sequence_recovery_seconds
-        )
+        sequence_close = sequence_gap is not None and sequence_gap <= max_sequence_gap
         # Never turn a negative (out-of-order) timestamp into an artificial 0 s
         # gap.  A close filename sequence may explicitly recover such a burst.
         if time_gap > max_seconds and not sequence_close:

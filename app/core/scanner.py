@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -13,26 +12,6 @@ from .models import PhotoFile
 
 _DIGITS = re.compile(r"(\d+)(?!.*\d)")
 _DATE_FORMATS = ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S")
-
-
-class _IgnoreUnsupportedExifContainer(logging.Filter):
-    """Hide ExifRead's expected warning for otherwise supported images.
-
-    ExifRead does not understand every container that the preview loader can
-    decode (notably PSD and some newer RAW variants).  In that case capture
-    time deliberately falls back to the file timestamp, so the warning is not
-    an image-read failure and should not be shown to the user.  Other ExifRead
-    warnings remain visible.
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return not (
-            record.levelno == logging.WARNING
-            and record.getMessage() == "File format not recognized."
-        )
-
-
-logging.getLogger("exifread").addFilter(_IgnoreUnsupportedExifContainer())
 
 
 def _sequence_number(path: Path) -> int | None:
