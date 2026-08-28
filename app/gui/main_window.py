@@ -7,6 +7,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from app import __version__
 from app.core.config import load_ui_state, merged_config, save_ui_state
 from app.core.pipeline import AnalysisPipeline, CancelledError
 from app.core.scanner import count_supported_photos
@@ -193,7 +194,7 @@ PORTRAIT_REPEAT_CODES = {value: label for label, value in PORTRAIT_REPEAT_MODES.
 class MainWindow(tk.Tk):
     def __init__(self, config: dict, initial_folder: str | None = None):
         super().__init__()
-        self.title("Photo Select AI v0.5.4 — портреты и группы")
+        self.title(f"Photo Select AI v{__version__} — портреты и группы")
         # Group quick-start has two additional option rows.  Use a taller
         # default on normal desktop displays, but never force the window beyond
         # the usable height of a smaller screen.
