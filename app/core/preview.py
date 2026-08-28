@@ -3,6 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 import mmap
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -32,9 +33,14 @@ def _resize_rgb(image: Image.Image, long_edge: int) -> np.ndarray:
     return np.asarray(image, dtype=np.uint8)
 
 
-def load_preview(path: Path, long_edge: int, raw_fallback_half_size: bool = True) -> np.ndarray:
+def load_preview(
+    path: Path,
+    long_edge: int,
+    raw_fallback_half_size: bool = True,
+    source_callback: Callable[[str], None] | None = None,
+) -> np.ndarray:
     if path.suffix.lower() in RAW_EXTENSIONS:
-        return _load_raw(path, long_edge, raw_fallback_half_size)
+        return _load_raw(path, long_edge, raw_fallback_half_size, source_callback)
     with Image.open(path) as image:
         return _resize_rgb(image, long_edge)
 
@@ -141,7 +147,12 @@ def _extract_largest_embedded_jpeg(path: Path, *, larger_than_area: int = 0) -> 
         return None
 
 
-def _load_raw(path: Path, long_edge: int, half_size: bool) -> np.ndarray:
+def _load_raw(
+    path: Path,
+    long_edge: int,
+    half_size: bool,
+    source_callback: Callable[[str], None] | None = None,
+) -> np.ndarray:
     import rawpy
 
     with rawpy.imread(str(path)) as raw:
@@ -173,6 +184,8 @@ def _load_raw(path: Path, long_edge: int, half_size: bool) -> np.ndarray:
         # Avoid scanning a large RAW file when that preview already satisfies
         # the requested working resolution.
         if thumb_rgb is not None and thumb_long_edge >= long_edge:
+            if source_callback is not None:
+                source_callback("rawpy_preview")
             return thumb_rgb
 
         embedded_jpeg = _extract_largest_embedded_jpeg(path, larger_than_area=thumb_area)
@@ -180,6 +193,8 @@ def _load_raw(path: Path, long_edge: int, half_size: bool) -> np.ndarray:
             try:
                 with Image.open(BytesIO(embedded_jpeg)) as image:
                     image.load()
+                    if source_callback is not None:
+                        source_callback("embedded_jpeg")
                     return _resize_rgb(image, long_edge)
             except Exception:
                 pass
@@ -188,6 +203,8 @@ def _load_raw(path: Path, long_edge: int, half_size: bool) -> np.ndarray:
         # demosaicing; preserve the old fallback only for files with no usable
         # embedded image at all.
         if thumb_rgb is not None:
+            if source_callback is not None:
+                source_callback("rawpy_preview")
             return thumb_rgb
 
         arr = raw.postprocess(
@@ -197,4 +214,6 @@ def _load_raw(path: Path, long_edge: int, half_size: bool) -> np.ndarray:
             output_bps=8,
         )
         with Image.fromarray(arr, mode="RGB") as image:
+            if source_callback is not None:
+                source_callback("demosaic")
             return _resize_rgb(image, long_edge)

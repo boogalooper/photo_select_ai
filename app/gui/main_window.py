@@ -505,9 +505,9 @@ class MainWindow(tk.Tk):
         row = self._check_row(
             tab,
             row,
-            "Портреты — снимать старые YELLOW перед поиском поз:",
+            "Портреты — снимать старые YELLOW при финальной записи:",
             self.clear_yellow_var,
-            "Используется только в режиме «Один ребёнок / разные позы». Рекомендуется включить при повторном прогоне, чтобы старые YELLOW не остались на кадрах, которые больше не считаются отдельной позой.",
+            "Используется только в режиме «Один ребёнок / разные позы». Старая YELLOW снимается только после полного анализа, одновременно с записью нового плана меток. При отмене анализа XMP не изменяется; остальные XMP/Camera Raw данные сохраняются.",
         )
         self._portrait_repeat_basic_option_widgets.extend(self._grid_row_widgets(tab, repeat_clear_row))
 
@@ -534,18 +534,18 @@ class MainWindow(tk.Tk):
         emin.grid(row=1, column=5, sticky="w", padx=(4, 2), pady=1)
         emax = ttk.Entry(groups, textvariable=self.group_max_extra_var, width=3)
         emax.grid(row=1, column=6, sticky="w", padx=(2, 0), pady=1)
-        ToolTip(emin, "Минимум: 0\nМаксимум: 3\nРекомендуется: 1\nПо умолчанию: 1\n\nЕсли строгих head-swap кандидатов мало, программа доберёт сильные резервные групповые дубли до этого количества.")
-        ToolTip(emax, "Минимум: 0\nМаксимум: 3\nРекомендуется: 3\nПо умолчанию: 3")
+        ToolTip(emin, "Минимум: 0\nМаксимум: 5\nРекомендуется: 1\nПо умолчанию: 1\n\nМинимальное число YELLOW для группы. Сначала алгоритм анализа ищет целевые кадры, исправляющие конкретные проблемы на RED; если их мало, добирает сильные резервные дубли до этого количества.")
+        ToolTip(emax, "Минимум: 0\nМаксимум: 5\nРекомендуется: 3\nПо умолчанию: 3\n\nМожно запросить до 5 YELLOW на одну групповую серию. Этот максимум используется непосредственно во время анализа: сначала выбираются YELLOW, закрывающие проблемы отдельных людей на RED, затем при необходимости добавляются резервные дубли до заданного минимума.")
         self._yellow_option_widgets.extend([emin, emax])
         self._yellow_option_widgets.extend([w for w in groups.grid_slaves(row=1) if int(w.grid_info().get("column", 0)) >= 4])
         c1 = ttk.Checkbutton(groups, text="Искать YELLOW / резервные дубли", variable=self.group_find_candidates_var)
         c1.grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
         self.group_find_candidates_check = c1
-        ToolTip(c1, "Сначала ищутся целевые YELLOW для конкретных проблем детей. Если их меньше YELLOW минимум, добавляются сильные резервные дубли.")
-        c2 = ttk.Checkbutton(groups, text="Снимать старые YELLOW", variable=self.clear_yellow_var)
+        ToolTip(c1, "Сначала в процессе анализа ищутся целевые YELLOW для конкретных проблем людей на RED. Затем, если их меньше заданного YELLOW минимума, добавляются сильные резервные дубли. Пользователь может разрешить до 5 YELLOW на одну групповую серию.")
+        c2 = ttk.Checkbutton(groups, text="Снимать старые YELLOW при финальной записи", variable=self.clear_yellow_var)
         c2.grid(row=2, column=4, columnspan=3, sticky="w", pady=(3, 0))
         self.clear_yellow_check = c2
-        ToolTip(c2, "Рекомендуется: включено при повторных прогонах группового режима.")
+        ToolTip(c2, "Старая YELLOW снимается только после полного анализа, на финальном этапе записи меток. При отмене анализа XMP не изменяется; остальные XMP/Camera Raw данные сохраняются.")
         c3 = ttk.Checkbutton(
             groups,
             text="Поиск маленьких лиц: улучшенный дополнительный проход (медленнее)",
@@ -643,9 +643,9 @@ class MainWindow(tk.Tk):
         row = self._check_row(
             tab,
             row,
-            "Снять старые RED перед анализом:",
+            "Снять старые RED при финальной записи:",
             self.clear_red_var,
-            "Рекомендуется: включено для повторных прогонов. Удаляется только текущая RED-метка, которую могла оставить предыдущая версия программы. Остальные XMP/Camera Raw данные сохраняются.",
+            "Рекомендуется для повторных прогонов. Старая RED снимается только после полного анализа, на финальном этапе записи меток. При отмене анализа XMP не изменяется. Остальные XMP/Camera Raw данные сохраняются.",
         )
 
         ttk.Separator(tab).grid(row=row, column=0, columnspan=3, sticky="ew", pady=8); row += 1
@@ -934,8 +934,8 @@ class MainWindow(tk.Tk):
         tab.columnconfigure(1, weight=1)
         row = 0
         ttk.Label(tab, text="Общие настройки производительности и InsightFace/CUDA. Они применяются и к портретам, и к группам.", wraplength=790).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10)); row += 1
-        row = self._spin_row(tab, row, "Параллельные задачи чтения и метаданных:", self.cpu_workers_var, 1, 8, 1,
-            "Рекомендуется: 2. Это число используется для параллельной подготовки XMP-меток и предзагрузки изображений. Файлы с общим sidecar XMP всегда обрабатываются последовательно. На SSD можно попробовать 3–4; для HDD слишком большое значение может не ускорить работу. 1 полностью отключает эту параллельность.")
+        row = self._spin_row(tab, row, "Параллельные задачи EXIF и preview:", self.cpu_workers_var, 1, 8, 1,
+            "Рекомендуется: 2. Это число используется для selective EXIF-чтения и предзагрузки изображений. Финальная XMP-запись выполняется отдельно и последовательно внутри каждого логического ресурса RAW+JPEG. На SSD можно попробовать 3–4; для HDD слишком большое значение может не ускорить работу.")
         row = self._section(tab, row, "Экспериментальное ускорение GPU")
         row = self._check_row(tab, row, "Параллельный InsightFace-анализ:", self.parallel_face_analysis_var,
             "По умолчанию выключено. Создаёт несколько независимых InsightFace/ONNX Runtime сессий и анализирует разные кадры одновременно. Это увеличивает расход VRAM. Для 32 ГБ VRAM разумно начать с 2 сессий.")
@@ -1441,9 +1441,9 @@ class MainWindow(tk.Tk):
                 raise ValueError("preview")
             if self.mode_var.get() == "group" and not 2 <= int(self.group_min_people_var.get()) <= 80:
                 raise ValueError("min_people")
-            if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and not 0 <= int(self.group_max_extra_var.get()) <= 3:
+            if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and not 0 <= int(self.group_max_extra_var.get()) <= 5:
                 raise ValueError("max_extra")
-            if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and not 0 <= int(self.group_min_extra_var.get()) <= 3:
+            if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and not 0 <= int(self.group_min_extra_var.get()) <= 5:
                 raise ValueError("min_extra")
             if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and int(self.group_min_extra_var.get()) > int(self.group_max_extra_var.get()):
                 raise ValueError("extra_order")
@@ -1455,9 +1455,9 @@ class MainWindow(tk.Tk):
             elif key == 'min_people':
                 msg = 'Мин. детей в группе должен быть в диапазоне 2–80.'
             elif key == 'max_extra':
-                msg = 'YELLOW максимум должен быть в диапазоне 0–3.'
+                msg = 'YELLOW максимум должен быть в диапазоне 0–5.'
             elif key == 'min_extra':
-                msg = 'YELLOW минимум должен быть в диапазоне 0–3.'
+                msg = 'YELLOW минимум должен быть в диапазоне 0–5.'
             else:
                 msg = 'YELLOW минимум не может быть больше YELLOW максимум.'
             messagebox.showerror("Некорректная настройка", msg)
@@ -1892,12 +1892,28 @@ def _photo_word(count: int) -> str:
 
 
 def _stats_text(stats) -> str:
+    scan_text = (
+        "--- Сканирование ---\n"
+        f"EXIF-чтений: {stats.scan_exif_reads}\n"
+        f"Попаданий в EXIF-кэш: {stats.scan_exif_cache_hits}\n"
+        f"Время из EXIF: {stats.scan_time_from_exif}\n"
+        f"Время из файла (mtime): {stats.scan_time_from_file}\n"
+        f"Порядок по имени: {stats.scan_order_from_name}\n"
+        f"Ошибок EXIF: {stats.scan_exif_failures}\n"
+        f"Файлов пропущено при сканировании: {stats.scan_files_skipped}\n"
+        f"RAW+JPEG пар обработано как один кадр: {stats.raw_jpeg_pairs_collapsed}\n\n"
+        "--- RAW preview ---\n"
+        f"rawpy/LibRaw preview: {stats.raw_preview_rawpy}\n"
+        f"JPEG из RAW-контейнера: {stats.raw_preview_embedded_jpeg}\n"
+        f"demosaic: {stats.raw_preview_demosaic}\n\n"
+    )
     if getattr(stats, "run_mode", "portrait") == "group":
         return (
             "===== ИТОГ АНАЛИЗА =====\n"
             f"Файлов найдено: {stats.files_found}\n"
             f"Файлов проанализировано: {stats.files_analyzed}\n\n"
-            f"Обработано групповых серий: {stats.group_series}\n"
+            + scan_text
+            + f"Обработано групповых серий: {stats.group_series}\n"
             f"Выбрано RED-групп: {stats.group_main_selected}\n"
             f"Выбрано YELLOW-кандидатов: {stats.group_extra_selected}\n"
             f"Серий без выбора: {stats.series_without_selection}\n\n"
@@ -1920,10 +1936,11 @@ def _stats_text(stats) -> str:
             f"Слишком коротких серий пропущено: {stats.skipped_short_series}\n"
             f"Кадров без обнаруженного лица: {stats.frames_without_faces}\n\n"
             "--- Метки ---\n"
-            f"Старых меток снято перед запуском: {stats.labels_cleared_before_run}\n"
+            f"Старых меток снято на финальном этапе: {stats.labels_cleared_before_run}\n"
             f"Меток записано: {stats.xmp_written}\n"
             f"  Встроено в JPG/JPEG: {stats.jpeg_embedded_written}\n"
             f"  Sidecar XMP: {stats.sidecar_xmp_written}\n"
+            f"Ошибок финальной записи меток: {stats.metadata_errors}\n"
             f"Ошибок анализа: {stats.analysis_errors}\n"
             "========================="
         )
@@ -1931,7 +1948,8 @@ def _stats_text(stats) -> str:
         "===== ИТОГ АНАЛИЗА =====\n"
         f"Файлов найдено: {stats.files_found}\n"
         f"Файлов проанализировано: {stats.files_analyzed}\n\n"
-        f"Обработано портретных серий: {stats.portrait_series}\n"
+        + scan_text
+        + f"Обработано портретных серий: {stats.portrait_series}\n"
         f"Выбрано RED-портретов: {stats.portrait_selected}\n"
         f"Выбрано YELLOW разных поз: {stats.portrait_repeat_yellow_selected}\n"
         f"Найдено детей в режиме поз: {stats.portrait_repeat_children}\n"
@@ -1949,10 +1967,11 @@ def _stats_text(stats) -> str:
         f"Слишком коротких серий пропущено: {stats.skipped_short_series}\n"
         f"Кадров без обнаруженного лица: {stats.frames_without_faces}\n\n"
         "--- Метки ---\n"
-        f"Старых RED снято перед запуском: {stats.labels_cleared_before_run}\n"
+        f"Старых меток снято на финальном этапе: {stats.labels_cleared_before_run}\n"
         f"Меток записано: {stats.xmp_written}\n"
         f"  Встроено в JPG/JPEG: {stats.jpeg_embedded_written}\n"
         f"  Sidecar XMP: {stats.sidecar_xmp_written}\n"
+        f"Ошибок финальной записи меток: {stats.metadata_errors}\n"
         f"Ошибок анализа: {stats.analysis_errors}\n"
         "========================="
     )

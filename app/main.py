@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
 
 from app.core.config import load_config, merged_config
 from app.core.logging_setup import setup_logging
-from app.core.pipeline import AnalysisPipeline, CancelledError
+from app.core.pipeline import AnalysisPipeline, AnalysisIncompleteError, CancelledError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,15 +78,32 @@ def main() -> int:
                 print(f"Портретных серий: {stats.portrait_series}")
                 print(f"Выбрано лучших кадров: {stats.portrait_selected}")
             print(f"Серий без выбора: {stats.series_without_selection}")
-            print(f"Старых RED-меток снято: {stats.labels_cleared_before_run}")
+            print(
+                "Сканирование: "
+                f"EXIF={stats.scan_exif_reads}, cache={stats.scan_exif_cache_hits}, "
+                f"время EXIF={stats.scan_time_from_exif}, mtime={stats.scan_time_from_file}, "
+                f"по имени={stats.scan_order_from_name}, ошибки EXIF={stats.scan_exif_failures}, "
+                f"пропущено={stats.scan_files_skipped}"
+            )
+            print(f"RAW+JPEG пар обработано как один кадр: {stats.raw_jpeg_pairs_collapsed}")
+            print(
+                "RAW preview: "
+                f"rawpy={stats.raw_preview_rawpy}, JPEG из контейнера={stats.raw_preview_embedded_jpeg}, "
+                f"demosaic={stats.raw_preview_demosaic}"
+            )
+            print(f"Старых меток снято на финальном этапе: {stats.labels_cleared_before_run}")
             print(f"Меток записано: {stats.xmp_written}")
             print(f"Встроено в JPG/JPEG: {stats.jpeg_embedded_written}")
             print(f"Sidecar XMP: {stats.sidecar_xmp_written}")
+            print(f"Ошибок финальной записи меток: {stats.metadata_errors}")
             print(f"Кадров без лица: {stats.frames_without_faces}")
             print(f"Ошибок анализа: {stats.analysis_errors}")
             return 0
         except CancelledError:
             return 130
+        except AnalysisIncompleteError as exc:
+            print(f"\nОшибка анализа: {exc}", file=sys.stderr)
+            return 1
 
     from app.gui.main_window import MainWindow
     MainWindow(config, initial_folder=args.folder).mainloop()

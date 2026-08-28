@@ -1124,7 +1124,7 @@ def select_group_series(
 
     extras: list[Selection] = []
     if bool(cfg.get("find_headswap_candidates", True)):
-        max_extra = max(0, min(3, int(cfg.get("max_extra_candidates", 3))))
+        max_extra = max(0, min(5, int(cfg.get("max_extra_candidates", 3))))
         remaining = dict(problems)
         chosen_frames = {best_idx}
 

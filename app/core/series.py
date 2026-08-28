@@ -34,7 +34,10 @@ def build_candidate_series(photos: list[PhotoFile], config: dict) -> list[PhotoS
         if prev.sequence_number is not None and cur.sequence_number is not None:
             delta = cur.sequence_number - prev.sequence_number
             name_gap_ok = 0 < delta <= max_name_gap
-        if time_gap <= max_gap and name_gap_ok:
+        same_source = True
+        if mode == "group":
+            same_source = prev.sequence_source == cur.sequence_source
+        if same_source and time_gap <= max_gap and name_gap_ok:
             groups[-1].append(cur)
         else:
             groups.append([cur])

@@ -12,6 +12,10 @@ class PhotoFile:
     capture_time: datetime
     sequence_number: Optional[int]
     extension: str
+    capture_time_source: str = "file"
+    order_source: str = "time"
+    metadata_cached: bool = False
+    sequence_source: tuple[str, str] = ("", "")
 
 
 @dataclass(slots=True)
@@ -132,6 +136,18 @@ class RunStats:
     portrait_boundary_guard_proposals: int = 0
     portrait_boundary_guard_splits: int = 0
     labels_cleared_before_run: int = 0
+    scan_exif_reads: int = 0
+    scan_exif_cache_hits: int = 0
+    scan_time_from_exif: int = 0
+    scan_time_from_file: int = 0
+    scan_order_from_name: int = 0
+    scan_exif_failures: int = 0
+    scan_files_skipped: int = 0
+    raw_preview_rawpy: int = 0
+    raw_preview_embedded_jpeg: int = 0
+    raw_preview_demosaic: int = 0
+    raw_jpeg_pairs_collapsed: int = 0
+    metadata_errors: int = 0
 
     @property
     def total_selected(self) -> int:

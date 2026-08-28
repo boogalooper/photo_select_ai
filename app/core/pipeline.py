@@ -22,7 +22,7 @@ from app.analysis.grouping import (
 from app.analysis.scoring import select_portrait
 from app.core.models import FrameAssessment, RunStats, Selection
 from app.core.preview import load_preview
-from app.core.scanner import scan_photos
+from app.core.scanner import ScanReport, scan_photos
 from app.core.series import (
     build_candidate_series,
     refine_assessments_detailed,
@@ -55,6 +55,9 @@ class AnalysisPipeline:
         self.message = message or (lambda _m: None)
         self.log = logging.getLogger("photo_select_ai")
         self.mode = str(config.get("runtime", {}).get("mode", "portrait")).lower()
+        self._pair_preview_fallbacks: dict[Path, Path] = {}
+        self._preview_source_lock = threading.Lock()
+        self._active_stats: RunStats | None = None
 
 
     def _emit_progress(self, value: float, message: str) -> None:
@@ -88,70 +91,140 @@ class AnalysisPipeline:
             value = 2
         return max(1, min(8, value))
 
-    def _clear_old_labels(self, photos, writer, clear_red: bool, clear_yellow: bool, stats) -> None:
-        """Clear old labels concurrently without racing on a shared sidecar.
+    @staticmethod
+    def _metadata_resource_key(photo_or_path) -> str:
+        path = photo_or_path.path if hasattr(photo_or_path, "path") else Path(photo_or_path)
+        return str(path.with_suffix("")).casefold()
 
-        One worker owns the complete embedded-XMP + sidecar operation for a
-        photo. Files with the same directory/stem (for example IMG_0001.CR3
-        and IMG_0001.JPG) share one lock because they may also share
-        IMG_0001.xmp. Independent stems can be processed in parallel.
+    def _build_metadata_plan(self, selections: list[Selection]) -> dict[str, str]:
+        """Build one RED/YELLOW role per logical path-without-extension resource."""
+        plan: dict[str, str] = {}
+        for selection in selections:
+            role = str(selection.label_role).lower()
+            if role not in {"red", "yellow"}:
+                continue
+            key = self._metadata_resource_key(selection.photo)
+            previous = plan.get(key)
+            if previous is None or previous == role:
+                plan[key] = role
+                continue
+            # A resource must never end the run with two logical roles. RED is
+            # the deterministic winner because it represents the main choice.
+            winner = "red" if "red" in {previous, role} else role
+            plan[key] = winner
+            self.log.warning(
+                "Metadata role conflict for %s: %s vs %s; using %s",
+                selection.photo.path.with_suffix(""), previous, role, winner,
+            )
+        return plan
+
+    def _apply_metadata_changes(
+        self,
+        photos,
+        writer: XmpWriter,
+        selections: list[Selection],
+        clear_red: bool,
+        clear_yellow: bool,
+        stats: RunStats,
+        metadata_plan: dict[str, str] | None = None,
+    ) -> None:
+        """Commit the complete metadata plan after all analysis has succeeded.
+
+        This is intentionally a deferred commit rather than a rollback-capable
+        database transaction. Cancellation is checked once immediately before
+        the first write; after that the small metadata stage is completed so a
+        cancel cannot leave half the shoot on the old plan and half on the new.
         """
-        photos = list(photos)
-        total = len(photos)
-        if not total:
+        plan = metadata_plan if metadata_plan is not None else self._build_metadata_plan(selections)
+        self._check_cancelled()  # final cancellation point before any XMP change
+
+        resources: dict[str, list] = {}
+        seen_paths: set[str] = set()
+        for photo in photos:
+            path_key = str(photo.path).casefold()
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            resources.setdefault(self._metadata_resource_key(photo), []).append(photo)
+        for selection in selections:
+            photo = selection.photo
+            path_key = str(photo.path).casefold()
+            if path_key not in seen_paths:
+                seen_paths.add(path_key)
+                resources.setdefault(self._metadata_resource_key(photo), []).append(photo)
+
+        total = max(1, len(resources))
+        self.message(
+            f"Финальная запись: ресурсов={len(resources)}, выбранных={len(plan)}; "
+            "после начала commit отмена применяется только к следующему запуску."
+        )
+        for completed, key in enumerate(sorted(resources), start=1):
+            physical = sorted(
+                resources[key],
+                key=lambda photo: (
+                    photo.extension.lower() in {".jpg", ".jpeg"},
+                    str(photo.path).casefold(),
+                ),
+            )
+            role = plan.get(key)
+            resource_error = False
+            resource_cleared = False
+            if role is not None:
+                for photo in physical:
+                    try:
+                        writer.write(photo, role)
+                        self._count_metadata_write(stats, photo)
+                    except Exception as exc:
+                        resource_error = True
+                        self.log.error(
+                            "Final metadata write failed for %s (%s): %s",
+                            photo.path, role, exc, exc_info=(type(exc), exc, exc.__traceback__),
+                        )
+            elif clear_red or clear_yellow:
+                for photo in physical:
+                    try:
+                        if clear_red:
+                            resource_cleared = writer.clear_label(photo, "red") or resource_cleared
+                        if clear_yellow:
+                            resource_cleared = writer.clear_label(photo, "yellow") or resource_cleared
+                    except Exception as exc:
+                        resource_error = True
+                        self.log.error(
+                            "Final metadata clear failed for %s: %s",
+                            photo.path, exc, exc_info=(type(exc), exc, exc.__traceback__),
+                        )
+            if resource_cleared:
+                stats.labels_cleared_before_run += 1
+            if resource_error:
+                stats.metadata_errors += 1
+            self.progress(99.0 + 0.9 * completed / total, f"Финальная запись {completed}/{len(resources)}")
+
+    def _record_preview_source(self, source: str) -> None:
+        stats = self._active_stats
+        if stats is None:
             return
-        workers = min(self._preview_workers(), total)
-        locks: dict[str, threading.Lock] = {}
-        locks_guard = threading.Lock()
+        with self._preview_source_lock:
+            if source == "rawpy_preview":
+                stats.raw_preview_rawpy += 1
+            elif source == "embedded_jpeg":
+                stats.raw_preview_embedded_jpeg += 1
+            elif source == "demosaic":
+                stats.raw_preview_demosaic += 1
 
-        def resource_lock(photo):
-            key = str(photo.path.with_suffix("")).casefold()
-            with locks_guard:
-                return locks.setdefault(key, threading.Lock())
-
-        def clear_one(photo):
-            if self.cancel_event.is_set():
-                return photo, False, None
-            try:
-                with resource_lock(photo):
-                    if self.cancel_event.is_set():
-                        return photo, False, None
-                    changed = False
-                    if clear_red:
-                        changed = writer.clear_label(photo, "red") or changed
-                    if clear_yellow:
-                        changed = writer.clear_label(photo, "yellow") or changed
-                return photo, changed, None
-            except Exception as exc:
-                return photo, False, exc
-
-        if workers <= 1:
-            results = (clear_one(photo) for photo in photos)
-            executor = None
-        else:
-            self.message(f"Подготовка меток: параллельных задач {workers}.")
-            executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="photo-xmp")
-            futures = [executor.submit(clear_one, photo) for photo in photos]
-            results = (future.result() for future in as_completed(futures))
-
-        completed = 0
+    def _load_preview_with_pair_fallback(self, path: Path, long_edge: int, fallback_half: bool):
         try:
-            for photo, changed, error in results:
-                self._check_cancelled()
-                completed += 1
-                if changed:
-                    stats.labels_cleared_before_run += 1
-                if error is not None:
-                    self.log.error(
-                        "Failed to clear existing labels from %s: %s",
-                        photo.path, error, exc_info=(type(error), error, error.__traceback__),
-                    )
-                self.progress(2.0 + 5.0 * completed / total, f"Подготовка меток {completed}/{total}")
-        finally:
-            if executor is not None:
-                for future in futures:
-                    future.cancel()
-                executor.shutdown(wait=True, cancel_futures=True)
+            return load_preview(
+                path, long_edge, fallback_half, source_callback=self._record_preview_source
+            )
+        except Exception:
+            fallback = self._pair_preview_fallbacks.get(path)
+            if fallback is None:
+                raise
+            self.log.warning(
+                "RAW preview failed for %s; using exact paired JPEG %s",
+                path.name, fallback.name,
+            )
+            return load_preview(fallback, long_edge, fallback_half)
 
     def _iter_loaded_previews(self, jobs, long_edge: int, fallback_half: bool):
         """Yield ``(payload, rgb, error)`` in input order with bounded prefetch.
@@ -167,7 +240,7 @@ class AnalysisPipeline:
             for payload, path in jobs:
                 self._check_cancelled()
                 try:
-                    yield payload, load_preview(path, long_edge, fallback_half), None
+                    yield payload, self._load_preview_with_pair_fallback(path, long_edge, fallback_half), None
                 except Exception as exc:
                     yield payload, None, exc
             return
@@ -178,7 +251,7 @@ class AnalysisPipeline:
 
         def submit_one(job) -> None:
             payload, path = job
-            pending.append((payload, path, executor.submit(load_preview, path, long_edge, fallback_half)))
+            pending.append((payload, path, executor.submit(self._load_preview_with_pair_fallback, path, long_edge, fallback_half)))
 
         try:
             for _ in range(workers):
@@ -339,7 +412,7 @@ class AnalysisPipeline:
             self._check_cancelled()
             analyzer = analyzer_queue.get()
             try:
-                rgb = load_preview(photo.path, long_edge, fallback_half)
+                rgb = self._load_preview_with_pair_fallback(photo.path, long_edge, fallback_half)
                 self._check_cancelled()
                 return payload, analyzer.analyze(photo, rgb), None
             except CancelledError:
@@ -363,6 +436,7 @@ class AnalysisPipeline:
     def run(self, folder: Path) -> tuple[RunStats, list[Selection]]:
         stats = RunStats(run_mode=self.mode)
         selections: list[Selection] = []
+        self._active_stats = stats
         if self.config["runtime"].get("cleanup_temp_on_start", True):
             cleanup_temp()
 
@@ -375,27 +449,55 @@ class AnalysisPipeline:
                     self.progress(1.0, "Сканирование файлов: поддерживаемые файлы не найдены")
                     return
                 pct = 1.0 + 0.9 * completed / total
-                detail = f"Сканирование файлов: метаданные {completed}/{total}"
+                detail = f"Сканирование файлов: индекс {completed}/{total}"
                 if path is not None:
                     detail += f" | {path.name}"
                 self.progress(pct, detail)
 
             scan_workers = self._preview_workers()
-            self.message(f"Чтение метаданных: параллельных задач {scan_workers}.")
+            scan_report = ScanReport()
+            if self.mode == "group":
+                scan_cfg = self.config.get("group", {})
+                scan_max_filename_gap = int(scan_cfg.get("max_filename_gap", self.config["series"]["max_filename_gap"]))
+                scan_max_gap_seconds = float(scan_cfg.get("max_gap_seconds", self.config["series"]["max_gap_seconds"]))
+            else:
+                scan_max_filename_gap = int(self.config["series"]["max_filename_gap"])
+                scan_max_gap_seconds = float(self.config["series"]["max_gap_seconds"])
+            self.message(f"Быстрый индекс: файловые данные + selective EXIF, потоков EXIF до {scan_workers}.")
             photos = scan_photos(
                 folder,
                 self.config["scan"]["extensions"],
                 bool(self.config["scan"].get("recursive", True)),
                 workers=scan_workers,
+                mode=self.mode,
+                max_filename_gap=scan_max_filename_gap,
+                max_gap_seconds=scan_max_gap_seconds,
+                report=scan_report,
                 progress=scan_progress,
                 check_cancelled=self._check_cancelled,
             )
             stats.files_found = len(photos)
+            stats.scan_exif_reads = scan_report.exif_reads
+            stats.scan_exif_cache_hits = scan_report.cache_hits
+            stats.scan_time_from_exif = scan_report.time_from_exif
+            stats.scan_time_from_file = scan_report.time_from_file
+            stats.scan_order_from_name = scan_report.order_from_name
+            stats.scan_exif_failures = scan_report.exif_failures
+            stats.scan_files_skipped = scan_report.files_skipped
+            stats.raw_jpeg_pairs_collapsed = scan_report.paired_jpeg_skipped
+            self._pair_preview_fallbacks = dict(scan_report.pair_preview_fallbacks)
+            metadata_photos = list(photos) + list(scan_report.metadata_only_photos)
+            self.message(
+                f"Индекс готов: для анализа={len(photos)}, EXIF-чтений={scan_report.exif_reads}, "
+                f"кэш EXIF={scan_report.cache_hits}, порядок по имени={scan_report.order_from_name}, "
+                f"RAW+JPEG пар свернуто={scan_report.paired_jpeg_skipped}, "
+                f"пропущено из-за ошибок={scan_report.files_skipped}"
+            )
             if not photos:
                 self.message("Поддерживаемые фотографии не найдены.")
                 return stats, []
 
-            self.progress(2.0, f"Сканирование завершено: {len(photos)} файлов")
+            self.progress(2.0, f"Сканирование завершено: {len(photos)} кадров для анализа")
 
             candidates = build_candidate_series(photos, self.config)
             stats.candidate_series = len(candidates)
@@ -420,10 +522,6 @@ class AnalysisPipeline:
                 if self.mode == "group" or (self.mode == "portrait" and portrait_repeat_mode)
                 else False
             )
-            if clear_red or clear_yellow:
-                self.message("Снятие старых меток этого профиля...")
-                self._clear_old_labels(photos, writer, clear_red, clear_yellow, stats)
-
             analyzers, backend_name = self._create_analyzer_pool(self.config, "Основной анализ")
             self.message(f"Распознавание лиц: {backend_name}")
             processed_files = 0
@@ -444,7 +542,7 @@ class AnalysisPipeline:
                     workers = self._preview_workers()
                     self.log.info("PREVIEW PREFETCH | workers=%d | long_edge=%d", workers, long_edge)
                     self.message(
-                        f"Предзагрузка изображений: {workers} "
+                        f"RAW preview: предзагрузка изображений, {workers} "
                         + ("поток" if workers == 1 else "потока" if workers in (2, 3, 4) else "потоков")
                         + "; InsightFace-анализ: 1 сессия"
                     )
@@ -476,11 +574,33 @@ class AnalysisPipeline:
                 # multiplies VRAM only within one stage, not across stages.
                 self._close_analyzer_pool(analyzers)
 
+            if stats.analysis_errors:
+                self.log.error(
+                    "Primary analysis finished with %d error(s); metadata commit is blocked and XMP remains unchanged",
+                    stats.analysis_errors,
+                )
+                self.message(
+                    f"Анализ завершён с ошибками ({stats.analysis_errors}). "
+                    "Финальная запись меток не начата; существующие XMP не изменены."
+                )
+                raise AnalysisIncompleteError(
+                    f"Не удалось полностью проанализировать {stats.analysis_errors} файл(а/ов). "
+                    "Для безопасности RED/YELLOW не изменялись. Подробности записаны в журнал."
+                )
+
             if self.mode == "group":
                 self._run_group_mode(all_candidate_assessments, writer, stats, selections)
             else:
                 self._run_portrait_mode(all_candidate_assessments, writer, stats, selections)
+
+            self.progress(99.0, "План меток: формирование итогового RED/YELLOW плана")
+            metadata_plan = self._build_metadata_plan(selections)
+            self.message(f"План меток: логических ресурсов выбрано={len(metadata_plan)}")
+            self._apply_metadata_changes(
+                metadata_photos, writer, selections, clear_red, clear_yellow, stats, metadata_plan
+            )
         finally:
+            self._active_stats = None
             if self.config["runtime"].get("cleanup_temp_on_exit", True):
                 cleanup_temp()
         self.progress(100.0, "Готово")
@@ -556,8 +676,6 @@ class AnalysisPipeline:
                     continue
                 sel.label_role = "red"
                 stats.portrait_selected += 1
-                writer.write(sel.photo, sel.label_role)
-                self._count_metadata_write(stats, sel)
                 selections.append(sel)
             self.progress(99.0, "Завершение портретного анализа...")
             return
@@ -616,8 +734,6 @@ class AnalysisPipeline:
             )
             red.label_role = "red"
             red.reason = f"child={child_id + 1}; best_across_series={len(series_indices)}; " + red.reason
-            writer.write(red.photo, red.label_role)
-            self._count_metadata_write(stats, red)
             selections.append(red)
             stats.portrait_selected += 1
             self.log.info(
@@ -723,8 +839,6 @@ class AnalysisPipeline:
             # the strongest portrait from each pose, then keep the best ones.
             yellow_candidates.sort(key=lambda sel: sel.score, reverse=True)
             for yellow in yellow_candidates[:max_yellows]:
-                writer.write(yellow.photo, yellow.label_role)
-                self._count_metadata_write(stats, yellow)
                 selections.append(yellow)
                 stats.portrait_repeat_yellow_selected += 1
                 self.log.info(
@@ -1139,19 +1253,15 @@ class AnalysisPipeline:
                     recycle_dedicated_attention_pool(group_idx)
                     continue
 
-                self.progress(selection_end, f"Группа {group_idx}/{len(group_like)}: запись RED/YELLOW меток")
+                self.progress(selection_end, f"Группа {group_idx}/{len(group_like)}: выбор RED/YELLOW")
                 result.main.label_role = "red"
-                writer.write(result.main.photo, "red")
-                self.log.info("GROUP LABEL RED (%s): %s", writer.red, result.main.photo.path.name)
-                self._count_metadata_write(stats, result.main)
+                self.log.info("GROUP PLAN RED (%s): %s", writer.red, result.main.photo.path.name)
                 stats.group_main_selected += 1
                 selections.append(result.main)
                 for extra_no, extra in enumerate(result.extras, start=1):
                     self._check_cancelled()
                     extra.label_role = "yellow"
-                    writer.write(extra.photo, "yellow")
-                    self.log.info("GROUP LABEL YELLOW (%s): %s", writer.yellow, extra.photo.path.name)
-                    self._count_metadata_write(stats, extra)
+                    self.log.info("GROUP PLAN YELLOW (%s): %s", writer.yellow, extra.photo.path.name)
                     stats.group_extra_selected += 1
                     selections.append(extra)
                     meta_pct = selection_end + (group_end - selection_end) * extra_no / max(1, len(result.extras) + 1)
@@ -1167,9 +1277,10 @@ class AnalysisPipeline:
         self.progress(99.0, "Завершение группового анализа...")
 
     @staticmethod
-    def _count_metadata_write(stats: RunStats, sel: Selection) -> None:
+    def _count_metadata_write(stats: RunStats, item) -> None:
+        photo = item.photo if isinstance(item, Selection) else item
         stats.xmp_written += 1
-        if sel.photo.extension.lower() in {".jpg", ".jpeg"}:
+        if photo.extension.lower() in {".jpg", ".jpeg"}:
             stats.jpeg_embedded_written += 1
         else:
             stats.sidecar_xmp_written += 1
@@ -1177,6 +1288,10 @@ class AnalysisPipeline:
     def _check_cancelled(self) -> None:
         if self.cancel_event.is_set():
             raise CancelledError("Analysis cancelled by user")
+
+
+class AnalysisIncompleteError(RuntimeError):
+    """Primary frame analysis was incomplete, so deferred metadata commit is forbidden."""
 
 
 class CancelledError(RuntimeError):

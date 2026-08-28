@@ -4,23 +4,20 @@ Current build supports independent Portrait and Group workflows.
 
 ```text
 shoot folder
-  -> scan + EXIF time / filename order
-  -> embedded RAW preview or direct JPG/TIFF/PSD preview
-  -> hard chronological blocks
+  -> fast path/sequence filesystem index
+  -> exact RAW+JPEG pair coalescing
+  -> EXIF cache + selective EXIF (Group) / EXIF-first uncached scan (Portrait)
+  -> deterministic source/time ordering
+  -> embedded RAW preview or exact paired-JPEG fallback
+  -> hard chronological/source blocks
   -> InsightFace SCRFD detection
   -> InsightFace recognition embedding
   -> InsightFace 106-point landmarks
-  -> strict DBSCAN identity grouping inside each hard block
-  -> neighbouring-fragment centroid merge (hysteresis)
-  -> strong-face evidence gate (reject false/one-off runs)
-  -> chronological split (A / B / A stays three series)
-  -> adjacent same-child merge across short hard-block gaps
-  -> portrait quality scoring
-  -> normal mode: one RED selection per series
-  -> optional multi-pose mode: link nearby series of one child
-  -> one global best RED across all child frames
-  -> conservative distinct-pose clustering -> optional YELLOW
-  -> Adobe XMP label
+  -> existing portrait/group refinement and scoring
+  -> Selection objects only (no metadata writes)
+  -> build complete logical RED/YELLOW metadata plan
+  -> final XMP commit
+  -> mirror one logical role to exact RAW+JPEG physical files
   -> temp cleanup
 ```
 
@@ -120,21 +117,35 @@ classification.
 
 ## XMP
 
-Normal Portrait writes only the RED winner. In optional multi-pose Portrait,
-one global RED plus YELLOW labels for accepted distinct poses may be written.
+Normal Portrait produces only the RED winner. In optional multi-pose Portrait, one global RED plus YELLOW selections for accepted distinct poses may be produced. Group mode likewise produces RED/YELLOW `Selection` objects during analysis, but **none of these stages writes metadata directly**. Group analysis may produce up to 5 YELLOW candidates per series when configured; the cap is applied inside candidate selection, not only at metadata output.
 
-Existing XMP is treated as user data and is never rebuilt with an XML serializer.
-Only the `xmp:Label` property is surgically changed or removed; Camera Raw
-settings, rating, crop, masks, keywords, custom namespaces and packet formatting
-remain untouched. Sidecars are atomically replaced after the surgical edit.
+The v0.5.9 metadata invariant is:
 
-JPEG standard XMP is updated inside its APP1 segment without pixel
-recompression. Existing embedded XMP in TIFF/DNG and compatible TIFF-based RAW
-containers is updated in-place only when the XMP payload can remain exactly the
-same byte length; PSD image-resource XMP follows the same rule. If an embedded
-packet cannot be changed without resizing/rebuilding its container, the source
-file is left untouched and a sidecar `.xmp` is used instead. Unsupported
-proprietary embedded-XMP containers are likewise left untouched.
+```text
+ANALYZE EVERYTHING FIRST
+-> COMPUTE COMPLETE LOGICAL RED/YELLOW PLAN
+-> COMMIT METADATA LAST
+```
+
+The logical metadata key is the case-insensitive path without extension. Thus `IMG_0001.CR2`, `IMG_0001.JPG` and `IMG_0001.xmp` belong to one resource. A RED/YELLOW conflict is resolved deterministically as RED > YELLOW. Exact RAW+JPEG pairs are analysed once using RAW, while the JPEG is retained as a metadata mirror and exact preview fallback.
+
+Cancellation is checked for the final time immediately before commit. If cancellation or an analysis exception occurs before that point, XMP is untouched. Once commit starts, cancellation is deliberately not checked between files; individual metadata failures are logged and counted while remaining resources continue. This is a deferred commit, not a rollback-capable database transaction.
+
+For selected resources the final role is written directly, without a destructive clear-then-write intermediate state. For unselected resources, configured old RED/YELLOW labels are cleared only during this final stage.
+
+Existing XMP is treated as user data and is never rebuilt with an XML serializer. Only the `xmp:Label` property is surgically changed or removed; Camera Raw settings, rating, crop, masks, keywords, custom namespaces and packet formatting remain untouched. Sidecars are atomically replaced after the surgical edit. Proprietary RAW files always use sidecars; DNG may use embedded XMP. JPEG standard XMP is updated inside its APP1 segment without pixel recompression. Existing sidecars are never deleted.
+
+## Fast scan and capture-time cache (v0.5.9)
+
+The scan stage first collects path, size, `mtime_ns`, `mtime`, trailing filename sequence and a case-insensitive `(parent folder, prefix before trailing digits)` sequence source. No ExifRead call is required for this filesystem index.
+
+Group mode sorts primarily by sequence source and filename sequence. EXIF is probed only around suspicious boundaries: missing/duplicate numbers, source changes, backward/repeated numbers, filename gaps above the configured threshold, or filesystem `mtime` gaps above the configured time threshold. Source changes are hard candidate-series boundaries. `mtime` is a cheap probe trigger/fallback, not a replacement for trustworthy capture time; Windows creation time is intentionally not used.
+
+Portrait mode remains conservative: valid cache entries are reused, then every uncached file is read with ExifRead and sorted EXIF-first. The persistent `runtime/cache/capture_times.json` stores only trustworthy EXIF capture times and validates entries by resolved case-insensitive path + file size + `mtime_ns`. Cache replacement uses a temporary file followed by `os.replace`.
+
+An ExifRead exception is isolated to the affected file. Missing EXIF DateTime is not fatal and falls back to filesystem `mtime`.
+
+RAW preview loading reports whether the successful source was `rawpy_preview`, `embedded_jpeg`, or `demosaic`. Every pipeline preview load uses the common RAW -> exact paired JPEG fallback wrapper.
 
 
 ## Windows CUDA DLL loading (v0.2.5)
