@@ -369,15 +369,33 @@ class AnalysisPipeline:
         try:
             self.progress(1.0, "Сканирование файлов...")
             self.message("Сканирование файлов...")
+
+            def scan_progress(completed: int, total: int, path: Path | None) -> None:
+                if total <= 0:
+                    self.progress(1.0, "Сканирование файлов: поддерживаемые файлы не найдены")
+                    return
+                pct = 1.0 + 0.9 * completed / total
+                detail = f"Сканирование файлов: метаданные {completed}/{total}"
+                if path is not None:
+                    detail += f" | {path.name}"
+                self.progress(pct, detail)
+
+            scan_workers = self._preview_workers()
+            self.message(f"Чтение метаданных: параллельных задач {scan_workers}.")
             photos = scan_photos(
                 folder,
                 self.config["scan"]["extensions"],
                 bool(self.config["scan"].get("recursive", True)),
+                workers=scan_workers,
+                progress=scan_progress,
+                check_cancelled=self._check_cancelled,
             )
             stats.files_found = len(photos)
             if not photos:
                 self.message("Поддерживаемые фотографии не найдены.")
                 return stats, []
+
+            self.progress(2.0, f"Сканирование завершено: {len(photos)} файлов")
 
             candidates = build_candidate_series(photos, self.config)
             stats.candidate_series = len(candidates)

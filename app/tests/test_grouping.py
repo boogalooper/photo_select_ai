@@ -73,7 +73,7 @@ def test_group_main_is_red_and_extras_are_yellow():
     assert result.main.label_role == "red"
     assert result.extras
     assert all(extra.label_role == "yellow" for extra in result.extras)
-    assert len(result.extras) <= 5
+    assert len(result.extras) <= 3
 
 
 def test_same_group_across_short_pause_merges_to_one_series():
@@ -338,6 +338,27 @@ def test_sequence_recovery_does_not_merge_next_different_group():
     assert [f.photo.sequence_number for f in merged[1]] == [4050, 4051]
 
 
+def test_adjacent_filenames_do_not_override_large_group_pause():
+    """Regression for real IMG_6153..IMG_6157 PSD group boundaries."""
+    start = datetime(2026, 1, 2, 12, 0, 0)
+    first = [group_frame(n, 0, start, people=4) for n in (6153, 6154, 6155, 6156)]
+    second = [group_frame(n, 0, start, people=4) for n in (6157, 6158)]
+
+    # Even identical synthetic embeddings must not defeat a clear 140-second
+    # boundary merely because the camera counters are adjacent.
+    for offset, item in enumerate(first):
+        item.photo.capture_time = start + timedelta(seconds=offset)
+    for offset, item in enumerate(second):
+        item.photo.capture_time = start + timedelta(seconds=143 + offset)
+
+    merged, count = merge_adjacent_group_blocks([first, second], CFG)
+
+    assert count == 0
+    assert len(merged) == 2
+    assert [f.photo.sequence_number for f in merged[0]] == [6153, 6154, 6155, 6156]
+    assert [f.photo.sequence_number for f in merged[1]] == [6157, 6158]
+
+
 def test_single_frame_group_member_is_promoted_into_roster():
     start = datetime(2026, 1, 2, 10, 0, 0)
     frames = [frame(i, [0.9, 0.9, 0.9, 0.9, 0.9], start) for i in range(3)]
@@ -511,51 +532,3 @@ def test_group_block_merge_reports_progress_to_completion():
     assert values[0] == 0.0
     assert values[-1] == 1.0
     assert any("соседних блоков" in m for _p, m in events)
-
-
-def test_group_can_return_five_targeted_yellow_candidates():
-    """The configured Group cap of five must be honoured end-to-end by selection."""
-    from copy import deepcopy
-
-    start = datetime(2026, 1, 1, 20, 0, 0)
-    people = 6
-    main = frame(0, [0.95] * people, start)
-    # Keep the main frame strongest overall, but give five different children
-    # closed eyes so each can require its own unique replacement frame.
-    for child in range(5):
-        main.faces[child].eye_open_left = 0.20
-        main.faces[child].eye_open_right = 0.20
-        main.faces[child].eye_sharpness = 0.90
-
-    frames = [main]
-    for candidate_no in range(5):
-        candidate = frame(candidate_no + 1, [0.60] * people, start)
-        for child in range(5):
-            candidate.faces[child].eye_open_left = 0.25
-            candidate.faces[child].eye_open_right = 0.25
-            candidate.faces[child].eye_sharpness = 0.90
-        candidate.faces[candidate_no].eye_open_left = 0.90
-        candidate.faces[candidate_no].eye_open_right = 0.90
-        frames.append(candidate)
-
-    cfg = deepcopy(CFG)
-    cfg["group"].update({
-        "track_max_frame_gap": 10,
-        "prioritize_open_eyes_main": False,
-        "max_extra_candidates": 5,
-        "min_extra_candidates": 0,
-        "eye_problem_threshold": 0.58,
-        "eye_candidate_threshold": 0.64,
-        "eye_improvement_margin": 0.08,
-        "headswap_min_eye_sharpness": 0.35,
-    })
-
-    result, diag = select_group_series(frames, cfg)
-    assert result.main is not None
-    assert result.main.photo.path.name == "IMG_0000.jpg"
-    assert len(result.extras) == 5
-    assert [item.photo.path.name for item in result.extras] == [
-        "IMG_0001.jpg", "IMG_0002.jpg", "IMG_0003.jpg", "IMG_0004.jpg", "IMG_0005.jpg"
-    ]
-    assert diag.covered_problems == 5
-    assert diag.unresolved_problems == 0

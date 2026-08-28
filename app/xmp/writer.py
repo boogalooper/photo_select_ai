@@ -14,13 +14,11 @@ RDF_NS = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
 XMP_NS = "http://ns.adobe.com/xap/1.0/"
 XMP_JPEG_HEADER = b"http://ns.adobe.com/xap/1.0/\x00"
 
-# Formats in which Adobe XMP can live in the image itself and for which we can
-# update the XMP payload without rebuilding the image container. Unknown or
-# unsupported RAW containers are deliberately left untouched; their sidecar is
-# used instead.
-_TIFF_LIKE_EXTENSIONS = {
-    ".dng", ".tif", ".tiff", ".cr2", ".nef", ".nrw", ".arw", ".pef", ".srw"
-}
+# Containers for which Photo Select AI may update an existing fixed-size XMP
+# packet in place. DNG explicitly supports embedded XMP. Proprietary RAW files
+# (CR2/NEF/ARW/etc.) are deliberately excluded even when their container is
+# TIFF-like: they always use an external sidecar and their bytes stay untouched.
+_EMBEDDED_TIFF_XMP_EXTENSIONS = {".dng", ".tif", ".tiff"}
 
 _XMLNS_RE = re.compile(
     r"\bxmlns(?::(?P<prefix>[A-Za-z_][\w.\-]*))?\s*=\s*(?P<q>['\"])(?P<uri>.*?)(?P=q)",
@@ -75,7 +73,7 @@ class XmpWriter:
 
         if ext in {".jpg", ".jpeg"} and bool(self.config["xmp"].get("jpeg_embedded", True)):
             changed = self._clear_jpeg_embedded_label(photo.path, label) or changed
-        elif ext in _TIFF_LIKE_EXTENSIONS:
+        elif ext in _EMBEDDED_TIFF_XMP_EXTENSIONS:
             changed = self._clear_fixed_embedded_label(photo.path, label, kind="tiff") or changed
         elif ext == ".psd":
             changed = self._clear_fixed_embedded_label(photo.path, label, kind="psd") or changed
@@ -163,11 +161,12 @@ class XmpWriter:
                 self._write_sidecar(sidecar, label)
             return photo.path
 
-        # DNG/TIFF and several TIFF-based RAW formats can contain XMP directly.
+        # DNG/TIFF can contain XMP directly. Proprietary RAW formats always use
+        # sidecars even when their underlying container is TIFF-like.
         # If an embedded packet already exists, update only its Label in place.
         # We never grow/rebuild the image container; if the packet has no room
         # for a new Label, fall back to a normal sidecar instead.
-        if ext in _TIFF_LIKE_EXTENSIONS:
+        if ext in _EMBEDDED_TIFF_XMP_EXTENSIONS:
             if self._write_fixed_embedded_if_possible(photo.path, label, kind="tiff"):
                 sidecar = photo.path.with_suffix(".xmp")
                 if sidecar.exists():

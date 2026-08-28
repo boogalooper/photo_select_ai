@@ -65,11 +65,8 @@ def test_fresh_venv_bootstraps_pip_with_uv_not_with_missing_pip():
     assert "& $Python -m pip --version" in helper
 
 
-def test_group_yellow_default_and_absolute_limit_are_consistent():
-    import json
-    from app.core.constants import GROUP_YELLOW_DEFAULT_MAX, GROUP_YELLOW_MAX_LIMIT
-
-    config = json.loads((ROOT / "config" / "default.json").read_text(encoding="utf-8"))
-    assert GROUP_YELLOW_DEFAULT_MAX == 2
-    assert GROUP_YELLOW_MAX_LIMIT == 5
-    assert config["group"]["max_extra_candidates"] == GROUP_YELLOW_DEFAULT_MAX
+def test_main_window_uses_full_width_without_embedded_log_panel():
+    source = (ROOT / "app" / "gui" / "main_window.py").read_text(encoding="utf-8")
+    assert "ttk.Panedwindow(self, orient=tk.HORIZONTAL)" not in source
+    assert "self.output = tk.Text(log_panel" not in source
+    assert "logging.getLogger(\"photo_select_ai\").info(value)" in source

@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 from PIL import Image
 
 from app.core.models import PhotoFile
-from app.xmp.writer import XMP_NS, XmpWriter, _find_standard_xmp_payload, _parse_xmp_payload
+from app.xmp.writer import XMP_NS, XmpWriter, _find_standard_xmp_payload, _new_xmp_packet, _parse_xmp_payload
 
 
 CFG = {
@@ -296,6 +296,48 @@ class XmpPreservationTests(unittest.TestCase):
             self.assertEqual(result, photo_path.with_suffix(".xmp"))
             self.assertEqual(photo_path.read_bytes(), original)
             self.assertTrue(photo_path.with_suffix(".xmp").exists())
+
+    def test_tiff_based_proprietary_raw_is_never_modified_internally(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.CR2"
+            original_raw = self._classic_tiff_with_xmp(_new_xmp_packet("Old"))
+            photo_path.write_bytes(original_raw)
+
+            result = XmpWriter(CFG).write(self._photo(photo_path, ".cr2"), "red")
+
+            self.assertEqual(result, photo_path.with_suffix(".xmp"))
+            self.assertEqual(photo_path.read_bytes(), original_raw)
+            root = ET.parse(result).getroot()
+            desc = next(root.iter("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description"))
+            self.assertEqual(desc.attrib[f"{{{XMP_NS}}}Label"], "Select")
+
+    def test_clear_proprietary_raw_changes_only_sidecar_label(self):
+        with TemporaryDirectory() as td:
+            photo_path = Path(td) / "A.NEF"
+            original_raw = self._classic_tiff_with_xmp(_new_xmp_packet("Select"))
+            photo_path.write_bytes(original_raw)
+            sidecar = photo_path.with_suffix(".xmp")
+            sidecar.write_text(
+                '<?xml version="1.0"?><x:xmpmeta xmlns:x="adobe:ns:meta/" '
+                'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#" '
+                'xmlns:xmp="http://ns.adobe.com/xap/1.0/" '
+                'xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/">'
+                '<rdf:RDF><rdf:Description rdf:about="" xmp:Label="Select" '
+                'crs:Exposure2012="0.55"/></rdf:RDF></x:xmpmeta>',
+                encoding="utf-8",
+            )
+
+            changed = XmpWriter(CFG).clear_label(self._photo(photo_path, ".nef"), "red")
+
+            self.assertTrue(changed)
+            self.assertEqual(photo_path.read_bytes(), original_raw)
+            self.assertTrue(sidecar.exists())
+            root = ET.parse(sidecar).getroot()
+            desc = next(root.iter("{http://www.w3.org/1999/02/22-rdf-syntax-ns#}Description"))
+            self.assertNotIn(f"{{{XMP_NS}}}Label", desc.attrib)
+            self.assertEqual(
+                desc.attrib["{http://ns.adobe.com/camera-raw-settings/1.0/}Exposure2012"], "0.55"
+            )
 
     @staticmethod
     def _minimal_psd_with_xmp(packet: bytes) -> bytes:
