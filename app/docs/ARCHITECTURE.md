@@ -133,7 +133,7 @@ Cancellation is checked for the final time immediately before commit. If cancell
 
 For selected resources the final role is written directly, without a destructive clear-then-write intermediate state. For unselected resources, configured old RED/YELLOW labels are cleared only during this final stage.
 
-Existing XMP is treated as user data and is never rebuilt with an XML serializer. Only the `xmp:Label` property is surgically changed or removed; Camera Raw settings, rating, crop, masks, keywords, custom namespaces and packet formatting remain untouched. Sidecars are atomically replaced after the surgical edit. Proprietary RAW files always use sidecars; DNG may use embedded XMP. JPEG standard XMP is updated inside its APP1 segment without pixel recompression. Existing sidecars are never deleted.
+Existing XMP is treated as user data and is never rebuilt with an XML serializer. Only the `xmp:Label` property is surgically changed or removed; Camera Raw settings, rating, crop, masks, keywords, custom namespaces and packet formatting remain untouched. Sidecars are atomically replaced after the surgical edit. Proprietary RAW files always use sidecars; DNG may use embedded XMP. JPEG standard XMP is updated inside its APP1 segment without pixel recompression. PSD/PSB uses Photoshop Image Resource 1060: fixed-size in-place editing is preferred, but when the packet must grow or resource 1060 is absent, only the length-delimited Image Resources section is streamed to an atomic replacement so layers/pixel data and neighboring resources remain byte-for-byte unchanged. Existing sidecars are never deleted.
 
 ## Fast scan and capture-time cache (v0.5.9)
 

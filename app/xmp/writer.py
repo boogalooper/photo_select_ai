@@ -3,7 +3,9 @@ from __future__ import annotations
 import html
 import os
 import re
+import shutil
 import struct
+from dataclasses import dataclass
 from pathlib import Path
 from xml.sax.saxutils import escape as xml_escape
 
@@ -173,11 +175,16 @@ class XmpWriter:
                     self._write_sidecar(sidecar, label)
                 return photo.path
         elif ext == ".psd":
-            if self._write_fixed_embedded_if_possible(photo.path, label, kind="psd"):
-                sidecar = photo.path.with_suffix(".xmp")
-                if sidecar.exists():
-                    self._write_sidecar(sidecar, label)
-                return photo.path
+            # PSD image resources can be resized safely by rewriting only the
+            # Image Resources section.  Keep the fast fixed-size in-place path
+            # when possible, but never fall back to a sidecar merely because
+            # resource 1060 needs to grow (or does not exist yet).
+            if not self._write_fixed_embedded_if_possible(photo.path, label, kind="psd"):
+                self._write_psd_embedded_resizable(photo.path, label)
+            sidecar = photo.path.with_suffix(".xmp")
+            if sidecar.exists():
+                self._write_sidecar(sidecar, label)
+            return photo.path
 
         path = photo.path.with_suffix(".xmp")
         self._write_sidecar(path, label)
@@ -221,6 +228,26 @@ class XmpWriter:
             return False
         _write_region(path, offset, fitted)
         return True
+
+    def _write_psd_embedded_resizable(self, path: Path, label: str) -> None:
+        """Set xmp:Label in PSD resource 1060, allowing the resource to resize.
+
+        PSD/PSB Image Resources are length-delimited.  Unlike TIFF tags, the
+        XMP resource can therefore be replaced (or inserted) while streaming
+        the rest of the document byte-for-byte to a temporary file.  This is
+        used only when the existing fixed-size packet cannot accommodate the
+        requested label.
+        """
+        layout = _find_psd_xmp_layout(path)
+        if layout is None:
+            raise RuntimeError(f"Cannot safely parse PSD Image Resources: {path}")
+
+        if layout.resource is not None:
+            original = _read_region(path, layout.resource.data_offset, layout.resource.data_size)
+            packet, _changed = _mutate_xmp_label_bytes(original, set_value=label)
+        else:
+            packet = _new_xmp_packet(label)
+        _rewrite_psd_xmp_resource(path, layout, packet)
 
 
 # ---------------------------------------------------------------------------
@@ -695,8 +722,26 @@ def _tiff_data_size(typ: int, count: int) -> int | None:
     return unit * count
 
 
-def _find_psd_xmp_region(path: Path) -> tuple[int, int] | None:
-    """Return the Photoshop image-resource XMP payload (resource id 1060)."""
+@dataclass(slots=True)
+class _PsdResourceRegion:
+    block_start: int
+    size_field_offset: int
+    data_offset: int
+    data_size: int
+    block_end: int
+
+
+@dataclass(slots=True)
+class _PsdXmpLayout:
+    resource_length_offset: int
+    resources_start: int
+    resources_end: int
+    resources_length: int
+    resource: _PsdResourceRegion | None
+
+
+def _find_psd_xmp_layout(path: Path) -> _PsdXmpLayout | None:
+    """Parse the PSD/PSB Image Resources section and locate resource 1060."""
     try:
         file_size = path.stat().st_size
         with path.open("rb") as fh:
@@ -706,47 +751,160 @@ def _find_psd_xmp_region(path: Path) -> tuple[int, int] | None:
             version = int.from_bytes(header[4:6], "big")
             if version not in {1, 2}:
                 return None
+
             color_len_raw = fh.read(4)
             if len(color_len_raw) != 4:
                 return None
             color_len = int.from_bytes(color_len_raw, "big")
+            if color_len < 0 or fh.tell() + color_len + 4 > file_size:
+                return None
             fh.seek(color_len, 1)
+
+            resource_length_offset = fh.tell()
             res_len_raw = fh.read(4)
             if len(res_len_raw) != 4:
                 return None
-            res_len = int.from_bytes(res_len_raw, "big")
+            resources_length = int.from_bytes(res_len_raw, "big")
             resources_start = fh.tell()
-            resources_end = resources_start + res_len
+            resources_end = resources_start + resources_length
             if resources_end > file_size:
                 return None
-            while fh.tell() + 12 <= resources_end:
+
+            found: _PsdResourceRegion | None = None
+            while fh.tell() < resources_end:
+                block_start = fh.tell()
+                if block_start + 12 > resources_end:
+                    return None
                 if fh.read(4) != b"8BIM":
                     return None
                 resource_id_raw = fh.read(2)
                 if len(resource_id_raw) != 2:
                     return None
                 resource_id = int.from_bytes(resource_id_raw, "big")
+
                 name_len_raw = fh.read(1)
                 if not name_len_raw:
                     return None
                 name_len = name_len_raw[0]
+                if fh.tell() + name_len > resources_end:
+                    return None
                 fh.seek(name_len, 1)
                 # Pascal string including its one-byte length is padded to even.
                 if (1 + name_len) % 2:
+                    if fh.tell() + 1 > resources_end:
+                        return None
                     fh.seek(1, 1)
+
+                size_field_offset = fh.tell()
                 size_raw = fh.read(4)
                 if len(size_raw) != 4:
                     return None
                 data_size = int.from_bytes(size_raw, "big")
                 data_offset = fh.tell()
-                if data_offset + data_size > resources_end:
+                block_end = data_offset + data_size + (data_size % 2)
+                if block_end > resources_end:
                     return None
-                if resource_id == 1060:
-                    return data_offset, data_size
-                fh.seek(data_size + (data_size % 2), 1)
+
+                if resource_id == 1060 and found is None:
+                    found = _PsdResourceRegion(
+                        block_start=block_start,
+                        size_field_offset=size_field_offset,
+                        data_offset=data_offset,
+                        data_size=data_size,
+                        block_end=block_end,
+                    )
+                fh.seek(block_end)
+
+            if fh.tell() != resources_end:
+                return None
+            return _PsdXmpLayout(
+                resource_length_offset=resource_length_offset,
+                resources_start=resources_start,
+                resources_end=resources_end,
+                resources_length=resources_length,
+                resource=found,
+            )
     except OSError:
         return None
-    return None
+
+
+def _find_psd_xmp_region(path: Path) -> tuple[int, int] | None:
+    """Return the Photoshop image-resource XMP payload (resource id 1060)."""
+    layout = _find_psd_xmp_layout(path)
+    if layout is None or layout.resource is None:
+        return None
+    return layout.resource.data_offset, layout.resource.data_size
+
+
+def _copy_file_range(src, dst, start: int, end: int, *, chunk_size: int = 8 * 1024 * 1024) -> None:
+    if end <= start:
+        return
+    src.seek(start)
+    remaining = end - start
+    while remaining:
+        chunk = src.read(min(chunk_size, remaining))
+        if not chunk:
+            raise RuntimeError("Unexpected end of PSD while rewriting embedded XMP")
+        dst.write(chunk)
+        remaining -= len(chunk)
+
+
+def _new_psd_xmp_resource_block(packet: bytes) -> bytes:
+    # Signature + resource id 1060 + empty Pascal name padded to even + size.
+    header = b"8BIM" + (1060).to_bytes(2, "big") + b"\x00\x00"
+    return header + len(packet).to_bytes(4, "big") + packet + (b"\x00" if len(packet) % 2 else b"")
+
+
+def _rewrite_psd_xmp_resource(path: Path, layout: _PsdXmpLayout, packet: bytes) -> None:
+    """Atomically replace/insert PSD XMP resource 1060 with a variable-size packet."""
+    if len(packet) > 0xFFFFFFFF:
+        raise RuntimeError(f"Embedded PSD XMP packet is too large: {path}")
+
+    file_size = path.stat().st_size
+    resource = layout.resource
+    if resource is not None:
+        with path.open("rb") as src:
+            src.seek(resource.block_start)
+            prefix = src.read(resource.size_field_offset - resource.block_start)
+        if len(prefix) != resource.size_field_offset - resource.block_start:
+            raise RuntimeError(f"Cannot read PSD XMP resource header safely: {path}")
+        new_block = prefix + len(packet).to_bytes(4, "big") + packet
+        if len(packet) % 2:
+            new_block += b"\x00"
+        old_block_start = resource.block_start
+        old_block_end = resource.block_end
+        old_block_size = old_block_end - old_block_start
+    else:
+        new_block = _new_psd_xmp_resource_block(packet)
+        old_block_start = layout.resources_end
+        old_block_end = layout.resources_end
+        old_block_size = 0
+
+    new_resources_length = layout.resources_length - old_block_size + len(new_block)
+    if not 0 <= new_resources_length <= 0xFFFFFFFF:
+        raise RuntimeError(f"PSD Image Resources section would exceed format limits: {path}")
+
+    tmp = path.with_name(path.name + ".photosel-psd.tmp")
+    try:
+        with path.open("rb") as src, tmp.open("wb") as dst:
+            _copy_file_range(src, dst, 0, layout.resource_length_offset)
+            dst.write(new_resources_length.to_bytes(4, "big"))
+            _copy_file_range(src, dst, layout.resources_start, old_block_start)
+            dst.write(new_block)
+            _copy_file_range(src, dst, old_block_end, file_size)
+            dst.flush()
+            os.fsync(dst.fileno())
+
+        try:
+            shutil.copystat(path, tmp)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _read_region(path: Path, offset: int, size: int) -> bytes:

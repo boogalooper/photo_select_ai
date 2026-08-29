@@ -172,8 +172,8 @@ class AnalysisPipeline:
             if role is not None:
                 for photo in physical:
                     try:
-                        writer.write(photo, role)
-                        self._count_metadata_write(stats, photo)
+                        destination = writer.write(photo, role)
+                        self._count_metadata_write(stats, photo, destination)
                     except Exception as exc:
                         resource_error = True
                         self.log.error(
@@ -1277,13 +1277,22 @@ class AnalysisPipeline:
         self.progress(99.0, "Завершение группового анализа...")
 
     @staticmethod
-    def _count_metadata_write(stats: RunStats, item) -> None:
+    def _count_metadata_write(stats: RunStats, item, destination: Path) -> None:
+        """Count the actual metadata destination returned by XmpWriter.
+
+        The old implementation inferred storage from the source extension and
+        therefore reported every PSD/TIFF/DNG write as a sidecar even when XMP
+        was embedded successfully.
+        """
         photo = item.photo if isinstance(item, Selection) else item
         stats.xmp_written += 1
+        destination = Path(destination)
+        if destination.suffix.lower() == ".xmp":
+            stats.sidecar_xmp_written += 1
+            return
+        stats.embedded_xmp_written += 1
         if photo.extension.lower() in {".jpg", ".jpeg"}:
             stats.jpeg_embedded_written += 1
-        else:
-            stats.sidecar_xmp_written += 1
 
     def _check_cancelled(self) -> None:
         if self.cancel_event.is_set():

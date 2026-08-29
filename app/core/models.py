@@ -123,6 +123,7 @@ class RunStats:
     group_problems_unresolved: int = 0
     group_backup_candidates: int = 0
     xmp_written: int = 0
+    embedded_xmp_written: int = 0
     jpeg_embedded_written: int = 0
     sidecar_xmp_written: int = 0
     skipped_short_series: int = 0
