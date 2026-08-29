@@ -153,34 +153,34 @@ class AnalysisPipeline:
                 seen_paths.add(path_key)
                 resources.setdefault(self._metadata_resource_key(photo), []).append(photo)
 
-        total = max(1, len(resources))
+        resource_keys = sorted(resources)
+        total = max(1, len(resource_keys))
+        metadata_error_keys: set[str] = set()
         self.message(
             f"Финальная запись: ресурсов={len(resources)}, выбранных={len(plan)}; "
             "после начала commit отмена применяется только к следующему запуску."
         )
-        for completed, key in enumerate(sorted(resources), start=1):
-            physical = sorted(
-                resources[key],
-                key=lambda photo: (
-                    photo.extension.lower() in {".jpg", ".jpeg"},
-                    str(photo.path).casefold(),
-                ),
+
+        # The clear options are intentionally literal.  When enabled, remove
+        # the configured RED/YELLOW label from every discovered physical file,
+        # including resources that will be selected again by this run.  This
+        # makes the result independent of labels left by earlier runs or by a
+        # different application/user.  Only after this complete cleanup pass do
+        # we write the new metadata plan.
+        if clear_red or clear_yellow:
+            self.message(
+                "Финальная запись: сначала очищаются все найденные старые "
+                "RED/YELLOW, затем записывается новый план."
             )
-            role = plan.get(key)
-            resource_error = False
-            resource_cleared = False
-            if role is not None:
-                for photo in physical:
-                    try:
-                        destination = writer.write(photo, role)
-                        self._count_metadata_write(stats, photo, destination)
-                    except Exception as exc:
-                        resource_error = True
-                        self.log.error(
-                            "Final metadata write failed for %s (%s): %s",
-                            photo.path, role, exc, exc_info=(type(exc), exc, exc.__traceback__),
-                        )
-            elif clear_red or clear_yellow:
+            for completed, key in enumerate(resource_keys, start=1):
+                physical = sorted(
+                    resources[key],
+                    key=lambda photo: (
+                        photo.extension.lower() in {".jpg", ".jpeg"},
+                        str(photo.path).casefold(),
+                    ),
+                )
+                resource_cleared = False
                 for photo in physical:
                     try:
                         if clear_red:
@@ -188,16 +188,45 @@ class AnalysisPipeline:
                         if clear_yellow:
                             resource_cleared = writer.clear_label(photo, "yellow") or resource_cleared
                     except Exception as exc:
-                        resource_error = True
+                        metadata_error_keys.add(key)
                         self.log.error(
                             "Final metadata clear failed for %s: %s",
                             photo.path, exc, exc_info=(type(exc), exc, exc.__traceback__),
                         )
-            if resource_cleared:
-                stats.labels_cleared_before_run += 1
-            if resource_error:
-                stats.metadata_errors += 1
-            self.progress(99.0 + 0.9 * completed / total, f"Финальная запись {completed}/{len(resources)}")
+                if resource_cleared:
+                    stats.labels_cleared_before_run += 1
+                self.progress(
+                    99.0 + 0.45 * completed / total,
+                    f"Финальная запись: очистка {completed}/{len(resource_keys)}",
+                )
+
+        selected_keys = [key for key in resource_keys if key in plan]
+        selected_total = max(1, len(selected_keys))
+        for completed, key in enumerate(selected_keys, start=1):
+            physical = sorted(
+                resources[key],
+                key=lambda photo: (
+                    photo.extension.lower() in {".jpg", ".jpeg"},
+                    str(photo.path).casefold(),
+                ),
+            )
+            role = plan[key]
+            for photo in physical:
+                try:
+                    destination = writer.write(photo, role)
+                    self._count_metadata_write(stats, photo, destination)
+                except Exception as exc:
+                    metadata_error_keys.add(key)
+                    self.log.error(
+                        "Final metadata write failed for %s (%s): %s",
+                        photo.path, role, exc, exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+            self.progress(
+                99.45 + 0.45 * completed / selected_total,
+                f"Финальная запись: новый план {completed}/{len(selected_keys)}",
+            )
+
+        stats.metadata_errors += len(metadata_error_keys)
 
     def _record_preview_source(self, source: str) -> None:
         stats = self._active_stats

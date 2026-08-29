@@ -62,8 +62,9 @@ class XmpWriter:
         self.yellow = yellow_label_value(config)
 
     def clear_label(self, photo: PhotoFile, role: str) -> bool:
-        """Remove only this profile's configured RED or YELLOW xmp:Label.
+        """Remove the configured RED or YELLOW xmp:Label, regardless of provenance.
 
+        The value is matched by the active label scheme, not by who created it.
         Both embedded XMP (where safely supported) and an existing sidecar are
         checked.  No XMP file is deleted and no unrelated metadata is changed.
         """

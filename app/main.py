@@ -91,7 +91,7 @@ def main() -> int:
                 f"rawpy={stats.raw_preview_rawpy}, JPEG из контейнера={stats.raw_preview_embedded_jpeg}, "
                 f"demosaic={stats.raw_preview_demosaic}"
             )
-            print(f"Старых меток снято на финальном этапе: {stats.labels_cleared_before_run}")
+            print(f"Ресурсов со старыми RED/YELLOW очищено: {stats.labels_cleared_before_run}")
             print(f"Меток записано: {stats.xmp_written}")
             print(f"Встроено в исходные файлы: {stats.embedded_xmp_written}")
             print(f"  из них JPG/JPEG: {stats.jpeg_embedded_written}")

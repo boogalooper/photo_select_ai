@@ -505,9 +505,9 @@ class MainWindow(tk.Tk):
         row = self._check_row(
             tab,
             row,
-            "Портреты — снимать старые YELLOW при финальной записи:",
+            "Портреты — удалить все старые YELLOW при финальной записи:",
             self.clear_yellow_var,
-            "Используется только в режиме «Один ребёнок / разные позы». Старая YELLOW снимается только после полного анализа, одновременно с записью нового плана меток. При отмене анализа XMP не изменяется; остальные XMP/Camera Raw данные сохраняются.",
+            "Используется только в режиме «Один ребёнок / разные позы». После полного анализа программа сначала удаляет настроенную YELLOW со всех найденных файлов, включая кадры, которые будут выбраны снова, независимо от того, кто поставил метку. Затем записывает новый план. При отмене до финального commit XMP не изменяется; остальные XMP/Camera Raw данные сохраняются.",
         )
         self._portrait_repeat_basic_option_widgets.extend(self._grid_row_widgets(tab, repeat_clear_row))
 
@@ -542,10 +542,10 @@ class MainWindow(tk.Tk):
         c1.grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
         self.group_find_candidates_check = c1
         ToolTip(c1, "Сначала в процессе анализа ищутся целевые YELLOW для конкретных проблем людей на RED. Затем, если их меньше заданного YELLOW минимума, добавляются сильные резервные дубли. Пользователь может разрешить до 5 YELLOW на одну групповую серию.")
-        c2 = ttk.Checkbutton(groups, text="Снимать старые YELLOW при финальной записи", variable=self.clear_yellow_var)
+        c2 = ttk.Checkbutton(groups, text="Удалить все старые YELLOW при финальной записи", variable=self.clear_yellow_var)
         c2.grid(row=2, column=4, columnspan=3, sticky="w", pady=(3, 0))
         self.clear_yellow_check = c2
-        ToolTip(c2, "Старая YELLOW снимается только после полного анализа, на финальном этапе записи меток. При отмене анализа XMP не изменяется; остальные XMP/Camera Raw данные сохраняются.")
+        ToolTip(c2, "После полного анализа программа сначала удаляет настроенную YELLOW со всех найденных файлов, включая файлы, которые будут снова выбраны YELLOW/RED, независимо от происхождения метки. Затем записывает новый план. При отмене до commit XMP не изменяется; остальные XMP/Camera Raw данные сохраняются.")
         c3 = ttk.Checkbutton(
             groups,
             text="Поиск маленьких лиц: улучшенный дополнительный проход (медленнее)",
@@ -643,9 +643,9 @@ class MainWindow(tk.Tk):
         row = self._check_row(
             tab,
             row,
-            "Снять старые RED при финальной записи:",
+            "Удалить все старые RED при финальной записи:",
             self.clear_red_var,
-            "Рекомендуется для повторных прогонов. Старая RED снимается только после полного анализа, на финальном этапе записи меток. При отмене анализа XMP не изменяется. Остальные XMP/Camera Raw данные сохраняются.",
+            "Рекомендуется для повторных прогонов. После полного анализа программа сначала удаляет настроенную RED со всех найденных файлов, включая кадры, которые будут снова выбраны RED/YELLOW, независимо от того, кто поставил метку. Затем записывает новый план. При отмене до commit XMP не изменяется. Остальные XMP/Camera Raw данные сохраняются.",
         )
 
         ttk.Separator(tab).grid(row=row, column=0, columnspan=3, sticky="ew", pady=8); row += 1
@@ -1936,7 +1936,7 @@ def _stats_text(stats) -> str:
             f"Слишком коротких серий пропущено: {stats.skipped_short_series}\n"
             f"Кадров без обнаруженного лица: {stats.frames_without_faces}\n\n"
             "--- Метки ---\n"
-            f"Старых меток снято на финальном этапе: {stats.labels_cleared_before_run}\n"
+            f"Ресурсов со старыми RED/YELLOW очищено: {stats.labels_cleared_before_run}\n"
             f"Меток записано: {stats.xmp_written}\n"
             f"  Встроено в исходные файлы: {stats.embedded_xmp_written}\n"
             f"    из них JPG/JPEG: {stats.jpeg_embedded_written}\n"
@@ -1968,7 +1968,7 @@ def _stats_text(stats) -> str:
         f"Слишком коротких серий пропущено: {stats.skipped_short_series}\n"
         f"Кадров без обнаруженного лица: {stats.frames_without_faces}\n\n"
         "--- Метки ---\n"
-        f"Старых меток снято на финальном этапе: {stats.labels_cleared_before_run}\n"
+        f"Ресурсов со старыми RED/YELLOW очищено: {stats.labels_cleared_before_run}\n"
         f"Меток записано: {stats.xmp_written}\n"
         f"  Встроено в исходные файлы: {stats.embedded_xmp_written}\n"
         f"    из них JPG/JPEG: {stats.jpeg_embedded_written}\n"
