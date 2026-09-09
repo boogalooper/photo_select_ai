@@ -328,6 +328,24 @@ class ForcedYellowTests(unittest.TestCase):
         self.assertEqual(len(selected.extras), 2)
 
 
+class HeadTurnSettingTests(unittest.TestCase):
+    def test_limit_and_disabled_mode(self):
+        from app.analysis.grouping import _group_pose_is_bad
+        face = ForcedYellowTests._frame(1, .9).faces[0]
+        for yaw, pitch, limit, expected in [(30, 20, 40, False), (41, 0, 40, True), (0, -45, 40, True), (80, 70, 0, False)]:
+            face.head_yaw_deg, face.head_pitch_deg = yaw, pitch
+            self.assertEqual(_group_pose_is_bad(face, {"group": {"max_head_turn_deg": limit}}), expected)
+
+    def test_open_eyes_precede_lower_total_defects(self):
+        frames = [ForcedYellowTests._frame(1, .9), ForcedYellowTests._frame(2, .9)]
+        frames[0].faces[0].eye_open_left = 0.0
+        frames[0].faces[0].eye_open_right = 0.0
+        for face in frames[1].faces:
+            face.head_yaw_deg = 50
+        selected, _ = select_group_series(frames, ForcedYellowTests._config(0), diagnostic_log=False)
+        self.assertEqual(selected.main.photo.path.name, "IMG_0002.jpg")
+
+
 class XmpCleanupTests(unittest.TestCase):
     def test_switching_to_lightroom_clears_old_bridge_labels(self):
         from tempfile import TemporaryDirectory

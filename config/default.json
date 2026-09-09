@@ -218,8 +218,7 @@
     "min_face_technical_quality": 0.3,
     "min_frame_technical_quality": 0.28,
     "head_pose_min_confidence": 0.3,
-    "max_head_yaw_deg": 20.0,
-    "max_head_pitch_deg": 22.0,
+    "max_head_turn_deg": 40.0,
     "eye_uncertain_margin": 0.06,
     "eye_sharpness_uncertain_margin": 0.05,
     "face_sharpness_uncertain_margin": 0.04

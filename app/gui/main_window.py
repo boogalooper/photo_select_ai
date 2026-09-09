@@ -146,6 +146,7 @@ class MainWindow(tk.Tk):
         self.group_find_candidates_var = tk.BooleanVar(value=bool(saved("group_find_candidates", config.get("group", {}).get("find_headswap_candidates", True))))
         self.group_max_extra_var = tk.IntVar(value=int(saved("group_max_extra", config.get("group", {}).get("max_extra_candidates", 3))))
         self.group_min_extra_var = tk.IntVar(value=int(saved("group_min_extra", config.get("group", {}).get("min_extra_candidates", 1))))
+        self.group_head_turn_var = tk.DoubleVar(value=float(saved("group_head_turn", config.get("group", {}).get("max_head_turn_deg", 40.0))))
         self.group_min_people_var = tk.IntVar(value=int(saved("group_min_people", config.get("group", {}).get("min_people", 4))))
         self.group_det_size_var = tk.IntVar(value=int(saved("group_det_size", config.get("analysis", {}).get("insightface_det_size_group", 1024))))
         self.group_det_thresh_var = tk.DoubleVar(value=float(saved("group_det_thresh", config.get("analysis", {}).get("insightface_det_thresh_group", 0.22))))
@@ -378,7 +379,7 @@ class MainWindow(tk.Tk):
         self.group_settings_frame = groups
         ttk.Label(
             groups,
-            text="Пригодность фиксирована: открытые глаза, допустимый поворот головы, резкость и техническое качество проверяются раньше FBP.",
+            text="Перед оценкой привлекательности: открытые глаза, допустимый поворот головы, резкость и техническое качество проверяются раньше FBP.",
             wraplength=820,
         ).grid(row=0, column=0, columnspan=7, sticky="w", pady=(0, 4))
         ttk.Label(groups, text="Мин. лиц в группе:").grid(row=1, column=0, sticky="w", pady=1)
@@ -406,6 +407,11 @@ class MainWindow(tk.Tk):
         c2.grid(row=3, column=0, columnspan=7, sticky="w", pady=(4, 0))
         self.group_camera_attention_check = c2
         ToolTip(c2, "Только для групп. После проверки пригодности программа защищает кадры без явно отведённых взглядов, затем сравнивает их по FBP. Если в первой порции нет надёжного варианта, проверка автоматически расширяется. При отключении используется обычный выбор без критерия взгляда.")
+        ttk.Label(groups, text="Допустимый поворот / наклон головы, °:").grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        head_turn = ttk.Spinbox(groups, from_=0, to=90, increment=5, textvariable=self.group_head_turn_var, width=5)
+        head_turn.grid(row=4, column=3, columnspan=2, sticky="w", pady=(4, 0))
+        ToolTip(head_turn, "По умолчанию 40°. Больше — мягче проверка. Обычные повороты и наклоны в пределах порога не считаются дефектом. 0 отключает проверку поворота головы. Углы приблизительные; наклон к плечу этим параметром не ограничивается. Проверка взгляда включается отдельно.")
+        self._numeric_specs.append((self.group_head_turn_var, "Допустимый поворот головы", 0.0, 90.0))
         row += 1
 
         series_method_row = row
@@ -1093,7 +1099,7 @@ class MainWindow(tk.Tk):
             if not self.group_camera_attention_var.get():
                 inactive_vars.update(id(v) for v in (self.group_camera_attention_shortlist_var, self.group_camera_attention_preview_var, self.group_camera_attention_det_size_var, self.group_camera_attention_min_eye_px_var))
         else:
-            inactive_vars.update(id(v) for v in (self.group_preview_var, self.group_det_size_var, self.group_det_thresh_var, self.group_min_face_pct_var, self.group_camera_attention_shortlist_var, self.group_camera_attention_preview_var, self.group_camera_attention_det_size_var, self.group_camera_attention_min_eye_px_var))
+            inactive_vars.update(id(v) for v in (self.group_head_turn_var, self.group_preview_var, self.group_det_size_var, self.group_det_thresh_var, self.group_min_face_pct_var, self.group_camera_attention_shortlist_var, self.group_camera_attention_preview_var, self.group_camera_attention_det_size_var, self.group_camera_attention_min_eye_px_var))
             if self.series_algorithm_var.get().strip().lower() == "dbscan":
                 inactive_vars.update(id(v) for v in (self.sequential_similarity_var, self.sequential_confirm_frames_var))
             else:
@@ -1176,9 +1182,9 @@ class MainWindow(tk.Tk):
         return True
 
     def _current_config(self) -> dict:
-        # Group suitability thresholds are fixed in config/default.json.  The UI
-        # exposes only operational controls; there are no competing rule profiles.
+        # The group head-turn limit is independently configurable.
         group_rules = {
+            "max_head_turn_deg": float(self.group_head_turn_var.get()),
             "min_people": int(self.group_min_people_var.get()),
             "find_headswap_candidates": bool(self.group_find_candidates_var.get()),
             "max_extra_candidates": int(self.group_max_extra_var.get()),
@@ -1453,6 +1459,7 @@ class MainWindow(tk.Tk):
             self.det_thresh_var.set(float(c["analysis"].get("insightface_det_thresh", 0.25))); self.det_size_portrait_var.set(int(c["analysis"].get("insightface_det_size_portrait", 640))); self.face_min_pct_var.set(float(c["analysis"].get("face_min_fraction", 0.0005)) * 100.0)
             self.group_preview_var.set(int(c["preview"].get("group_long_edge", 3200)))
             self.custom_yellow_var.set(str(c["xmp"].get("custom_yellow", "Second")))
+            self.group_head_turn_var.set(float(c.get("group", {}).get("max_head_turn_deg", 40.0)))
             self.group_min_people_var.set(int(c.get("group", {}).get("min_people", 4)))
             self.group_det_size_var.set(int(c.get("analysis", {}).get("insightface_det_size_group", 1024)))
             self.group_det_thresh_var.set(float(c.get("analysis", {}).get("insightface_det_thresh_group", 0.22)))
@@ -1480,6 +1487,7 @@ class MainWindow(tk.Tk):
     def _save_current_ui_state(self):
         save_ui_state({
             "state_version": UI_STATE_VERSION,
+            "group_head_turn": self.group_head_turn_var.get(),
             "folder": self.folder_var.get(), "mode": self.mode_var.get(), "preview": self.preview_var.get(), "group_preview": self.group_preview_var.get(), "scheme": self.scheme_var.get(), "custom_red": self.custom_red_var.get(), "custom_yellow": self.custom_yellow_var.get(), "group_min_people": self.group_min_people_var.get(), "group_min_extra": self.group_min_extra_var.get(), "group_max_extra": self.group_max_extra_var.get(), "group_find_candidates": self.group_find_candidates_var.get(), "group_det_size": self.group_det_size_var.get(), "group_det_thresh": self.group_det_thresh_var.get(), "group_min_face_pct": self.group_min_face_pct_var.get(), "group_camera_attention": self.group_camera_attention_var.get(), "group_camera_attention_shortlist": self.group_camera_attention_shortlist_var.get(), "group_camera_attention_preview": self.group_camera_attention_preview_var.get(), "group_camera_attention_det_size": self.group_camera_attention_det_size_var.get(), "group_camera_attention_min_eye_px": self.group_camera_attention_min_eye_px_var.get(),
             "advanced_visible": bool(self.advanced_var.get()),
             "insightface_provider": self.provider_var.get(), "cuda_conv_algo": self.cuda_algo_var.get(), "cuda_fallback": self.cuda_fallback_var.get(), "cpu_workers": self.cpu_workers_var.get(), "parallel_face_analysis": self.parallel_face_analysis_var.get(), "parallel_face_workers": self.parallel_face_workers_var.get(), "gpu_memory_safe_mode": self.gpu_memory_safe_mode_var.get(), "gpu_session_mem_limit_gb": self.gpu_session_mem_limit_gb_var.get(), "group_secondary_face_workers": self.group_secondary_face_workers_var.get(), "group_gpu_recycle_every": self.group_gpu_recycle_every_var.get(),

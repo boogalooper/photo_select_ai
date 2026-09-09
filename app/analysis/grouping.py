@@ -562,9 +562,10 @@ def _group_pose_is_bad(face: FaceAssessment, config: dict) -> bool:
     min_conf = max(0.0, min(1.0, float(cfg.get("head_pose_min_confidence", 0.30))))
     if not face.landmarks_reliable or face.head_pose_confidence < min_conf:
         return False
-    max_yaw = max(0.0, float(cfg.get("max_head_yaw_deg", 20.0)))
-    max_pitch = max(0.0, float(cfg.get("max_head_pitch_deg", 22.0)))
-    return abs(float(face.head_yaw_deg)) > max_yaw or abs(float(face.head_pitch_deg)) > max_pitch
+    limit = max(0.0, float(cfg.get("max_head_turn_deg", 40.0)))
+    if limit == 0.0:
+        return False
+    return max(abs(float(face.head_yaw_deg)), abs(float(face.head_pitch_deg))) > limit
 
 
 def _group_frame_defect_key(
@@ -605,7 +606,7 @@ def _group_frame_defect_key(
         if not face.landmarks_reliable:
             unknown += 1
         else:
-            if face.head_pose_confidence < min_pose_conf:
+            if float(cfg.get("max_head_turn_deg", 40.0)) > 0 and face.head_pose_confidence < min_pose_conf:
                 unknown += 1
             eye_limit = eye_problem_limits.get(tid, float(cfg.get("eye_problem_threshold", 0.62)))
             eyes = face.eyes_open_score
@@ -644,9 +645,9 @@ def _group_frame_defect_key(
     hard_total = missing + hard_closed + pose + hard_blur + poor_quality
     uncertain_total = uncertain_eyes + uncertain_blur + unknown
     return (
-        hard_total,
         missing,
         hard_closed,
+        hard_total,
         pose,
         hard_blur,
         poor_quality,
