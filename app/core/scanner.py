@@ -158,7 +158,6 @@ def _read_exif_capture_time(path: Path) -> datetime | None:
             fh,
             details=False,
             stop_tag="EXIF DateTimeOriginal",
-            extract_thumbnail=False,
         )
     for key in ("EXIF DateTimeOriginal", "Image DateTime"):
         if key in tags:
@@ -401,6 +400,10 @@ def _read_exif_indices(
     def read_one(index: int) -> tuple[int, datetime | None, Exception | None]:
         try:
             return index, _read_exif_capture_time(items[index].path), None
+        except TypeError:
+            # An incompatible API call is a program error, not a bad photo.
+            # Abort scanning instead of silently losing every EXIF-read frame.
+            raise
         except Exception as exc:
             return index, None, exc
 

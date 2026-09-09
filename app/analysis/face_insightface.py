@@ -571,15 +571,18 @@ def _head_pose_metrics(
         model_points = np.asarray(
             [
                 (0.0, 0.0, 0.0),
-                (0.0, -330.0, -65.0),
-                (-225.0, 170.0, -135.0),
-                (225.0, 170.0, -135.0),
-                (-150.0, -150.0, -125.0),
-                (150.0, -150.0, -125.0),
+                (0.0, 330.0, 65.0),
+                (-225.0, -170.0, 135.0),
+                (225.0, -170.0, 135.0),
+                (-150.0, 150.0, 125.0),
+                (150.0, 150.0, 125.0),
             ],
             dtype=np.float64,
         )
         h, w = image_shape[:2]
+        # Camera coordinates: Y points down, Z away from the camera.
+        # The former Y-up/Z-forward template made a frontal head require
+        # about 180 degrees of pitch, which was incorrectly treated as a turn.
         focal = float(max(w, h))
         camera = np.asarray(
             [[focal, 0.0, w / 2.0], [0.0, focal, h / 2.0], [0.0, 0.0, 1.0]],
@@ -592,6 +595,9 @@ def _head_pose_metrics(
         if not ok:
             return 0.50, 0.0, 0.0, 0.0
         rotation, _ = cv2.Rodrigues(rvec)
+        depths = (rotation @ model_points.T + tvec.reshape(3, 1))[2]
+        if not np.all(np.isfinite(depths)) or np.any(depths <= 0):
+            return 0.50, 0.0, 0.0, 0.0
         angles = cv2.RQDecomp3x3(rotation)[0]
         pitch, yaw = float(angles[0]), float(angles[1])
 
