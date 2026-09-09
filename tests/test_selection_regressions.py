@@ -233,6 +233,76 @@ class CameraAttentionTests(unittest.TestCase):
         self.assertEqual(selected.main.photo.path.name, "IMG_0006.jpg")
 
 
+class ForcedYellowTests(unittest.TestCase):
+    @staticmethod
+    def _frame(index: int, frame_technical: float) -> FrameAssessment:
+        faces = []
+        for person in range(4):
+            descriptor = [0.0] * 4
+            descriptor[person] = 1.0
+            faces.append(FaceAssessment(
+                bbox=(person * 100, 0, person * 100 + 80, 100),
+                center=((person + 0.5) / 4.0, 0.5), size_fraction=0.05,
+                eye_open_left=0.9, eye_open_right=0.9, smile=0.5,
+                expression=0.5, face_sharpness=0.9, eye_sharpness=0.9,
+                technical=0.9, quality=0.9,
+                portrait_preference_score=0.95 - index * 0.05,
+                portrait_preference_raw=3.0,
+                portrait_preference_reliable=True,
+                descriptor=descriptor, landmarks_reliable=True,
+                detection_confidence=1.0, descriptor_source="insightface",
+                head_pose_confidence=1.0,
+            ))
+        return FrameAssessment(
+            photo=PhotoFile(
+                Path(f"IMG_{index:04d}.jpg"), datetime(2026, 1, 1), index, ".jpg"
+            ),
+            faces=faces,
+            technical=frame_technical,
+        )
+
+    @staticmethod
+    def _config(minimum: int, maximum: int = 2) -> dict:
+        return {
+            "analysis": {"face_min_fraction": 0.0005},
+            "group": {
+                "min_people": 4, "min_track_presence": 2,
+                "match_threshold": 0.32, "portrait_preference_enabled": True,
+                "portrait_preference_min_known_fraction": 0.5,
+                "portrait_preference_min_relative_span": 0.08,
+                "camera_attention_enabled": False,
+                "find_headswap_candidates": True,
+                "min_extra_candidates": minimum,
+                "max_extra_candidates": maximum,
+            },
+        }
+
+    def test_zero_minimum_is_automatic_and_adds_no_unneeded_backup(self):
+        frames = [self._frame(1, 0.9), self._frame(2, 0.2), self._frame(3, 0.2)]
+        selected, _diag = select_group_series(
+            frames, self._config(0), diagnostic_log=False
+        )
+        self.assertEqual(selected.main.photo.path.name, "IMG_0001.jpg")
+        self.assertEqual(selected.extras, [])
+
+    def test_positive_minimum_is_filled_from_best_remaining_frames(self):
+        frames = [self._frame(1, 0.9), self._frame(2, 0.2), self._frame(3, 0.2)]
+        selected, diag = select_group_series(
+            frames, self._config(2), diagnostic_log=False
+        )
+        self.assertEqual(selected.main.photo.path.name, "IMG_0001.jpg")
+        self.assertEqual(len(selected.extras), 2)
+        self.assertEqual(diag.backup_extras, 2)
+        self.assertTrue(all(extra.label_role == "yellow" for extra in selected.extras))
+
+    def test_maximum_remains_a_hard_cap(self):
+        frames = [self._frame(i, 0.9) for i in range(1, 6)]
+        selected, _diag = select_group_series(
+            frames, self._config(5, maximum=2), diagnostic_log=False
+        )
+        self.assertEqual(len(selected.extras), 2)
+
+
 class XmpCleanupTests(unittest.TestCase):
     def test_switching_to_lightroom_clears_old_bridge_labels(self):
         from tempfile import TemporaryDirectory

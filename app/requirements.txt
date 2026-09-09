@@ -9,6 +9,7 @@ scipy==1.13.1
 scikit-image==0.24.0
 scikit-learn==1.5.2
 tqdm==4.66.5
+colorama==0.4.6
 requests==2.32.3
 
 # Complete transitive closure for the application packages and ONNX Runtime.

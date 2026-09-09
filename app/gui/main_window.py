@@ -390,14 +390,14 @@ class MainWindow(tk.Tk):
         emin.grid(row=1, column=3, sticky="w", padx=(4, 2), pady=1)
         emax = ttk.Entry(groups, textvariable=self.group_max_extra_var, width=3)
         emax.grid(row=1, column=4, sticky="w", padx=(2, 0), pady=1)
-        ToolTip(emin, "Минимум: 0\nМаксимум: 5\nРекомендуется: 1\nПо умолчанию: 1\n\nМинимальное число YELLOW для группы. Сначала ищутся кадры, исправляющие конкретные проблемы RED; если их мало, добавляются сильные резервные дубли.")
-        ToolTip(emax, "Минимум: 0\nМаксимум: 5\nРекомендуется: 3\nПо умолчанию: 3\n\nМаксимальное число YELLOW на групповую серию.")
+        ToolTip(emin, "Минимум: 0\nМаксимум: 5\nРекомендуется: 1\nПо умолчанию: 1\n\n0 — автоматический режим: остаются только полезные YELLOW, но не больше заданного максимума. Значение 1–5 принудительно задаёт минимум дополнительных YELLOW; если безопасных дублей не хватает, выбираются лучшие из оставшихся кадров.")
+        ToolTip(emax, "Минимум: 0\nМаксимум: 5\nРекомендуется: 3\nПо умолчанию: 3\n\nЖёсткий верхний предел числа YELLOW на групповую серию.")
         self._yellow_option_widgets.extend([emin, emax])
         self._yellow_option_widgets.extend([w for w in groups.grid_slaves(row=1) if int(w.grid_info().get("column", 0)) >= 2])
         c1 = ttk.Checkbutton(groups, text="Искать YELLOW / резервные дубли", variable=self.group_find_candidates_var)
         c1.grid(row=2, column=0, columnspan=5, sticky="w", pady=(3, 0))
         self.group_find_candidates_check = c1
-        ToolTip(c1, "Сначала ищутся целевые YELLOW для конкретных проблем людей на RED. Затем при необходимости добавляются сильные резервные дубли до заданного минимума.")
+        ToolTip(c1, "Сначала ищутся целевые YELLOW для конкретных проблем людей на RED. При минимуме выше нуля программа затем обязательно добирает лучшие доступные резервные дубли.")
         c2 = ttk.Checkbutton(
             groups,
             text="Учитывать взгляд в камеру — финальная проверка лучших дублей",

@@ -14,7 +14,7 @@ if exist "config\ca-bundle.pem" (
 )
 
 echo ==============================================
-echo Photo Select AI - installation v0.7.1
+echo Photo Select AI - installation v0.7.2
 echo Private Python: CPython 3.11.16 x64 via uv
 echo System Python and winget are not used.
 echo ==============================================

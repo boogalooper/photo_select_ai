@@ -117,7 +117,7 @@ Portrait RED selection is hierarchical: suitability first, then FBP when the bes
 
 ## XMP
 
-Normal Portrait produces only the RED winner. In optional multi-pose Portrait, one global RED plus YELLOW selections for accepted distinct poses may be produced. Group mode likewise produces RED/YELLOW `Selection` objects during analysis, but **none of these stages writes metadata directly**. Group analysis may produce up to 5 YELLOW candidates per series when configured; the cap is applied inside candidate selection, not only at metadata output.
+Normal Portrait produces only the RED winner. In optional multi-pose Portrait, one global RED plus YELLOW selections for accepted distinct poses may be produced. Group mode likewise produces RED/YELLOW `Selection` objects during analysis, but **none of these stages writes metadata directly**. Group analysis may produce up to 5 YELLOW candidates per series when configured; the cap is applied inside candidate selection, not only at metadata output. A zero Group minimum is automatic/problem-oriented mode. A positive minimum is forced: after targeted head-swap candidates, backup selection fills the requested count from RED's suitability tier and then from progressively worse remaining tiers, subject to the hard maximum and the number of unique frames available.
 
 The metadata invariant is:
 

@@ -1292,24 +1292,33 @@ def select_group_series(
 
         diag.unresolved_problems = len(remaining)
 
-        # Keep a practical reserve when requested, but never manufacture a
-        # generic backup from a worse suitability tier than RED. Targeted
-        # YELLOWs above are allowed to be imperfect elsewhere because they exist
-        # for a specific head swap; generic reserve YELLOWs must match RED's full
-        # suitability tier. Within that tier use the protected gaze rank for
-        # candidates that received the final high-resolution pass; otherwise
-        # fall back exactly to the ordinary RED rank.
+        # Zero means automatic mode: keep only problem-oriented YELLOWs. A
+        # positive minimum is explicit user intent, so fill the reserve up to
+        # that number. Prefer RED's suitability tier; if it is exhausted, walk
+        # through the remaining tiers from best to worst. The protected gaze
+        # rank is used within a tier when high-resolution data is available.
         min_extra = max(0, min(max_extra, int(cfg.get("min_extra_candidates", 1))))
         red_suitability = defect_keys[best_idx]
         while len(extras) < min_extra:
-            safe_candidates = [
+            backup_candidates = [
                 idx for idx in range(len(frames))
                 if idx not in chosen_frames and defect_keys[idx] == red_suitability
             ]
-            if not safe_candidates:
-                break
+            forced_degraded = False
+            if not backup_candidates:
+                remaining_candidates = [
+                    idx for idx in range(len(frames)) if idx not in chosen_frames
+                ]
+                if not remaining_candidates:
+                    break
+                next_suitability = min(defect_keys[idx] for idx in remaining_candidates)
+                backup_candidates = [
+                    idx for idx in remaining_candidates
+                    if defect_keys[idx] == next_suitability
+                ]
+                forced_degraded = True
             measured_safe = [
-                idx for idx in safe_candidates
+                idx for idx in backup_candidates
                 if idx in attention_frames
                 and _camera_attention_stats(
                     idx, track_ids, attention_matrix, config
@@ -1329,16 +1338,25 @@ def select_group_series(
                     ),
                 )
             else:
-                best_backup_idx = max(safe_candidates, key=lambda idx: base_ranks[idx])
+                best_backup_idx = max(backup_candidates, key=lambda idx: base_ranks[idx])
             chosen_frames.add(best_backup_idx)
             diag.backup_extras += 1
+            backup_kind = "forced_backup" if forced_degraded else "backup"
             extras.append(
                 Selection(
                     photo=frames[best_backup_idx].photo,
                     label_role="yellow",
                     score=frame_scores[best_backup_idx],
-                    reason=f"backup; same_suitability_tier={red_suitability}; people={len(tracks)}",
+                    reason=(
+                        f"{backup_kind}; suitability_tier={defect_keys[best_backup_idx]}; "
+                        f"requested_min={min_extra}; people={len(tracks)}"
+                    ),
                 )
+            )
+        if len(extras) < min_extra:
+            log.warning(
+                "GROUP YELLOW MINIMUM NOT REACHED | requested=%d | available=%d | red=%s",
+                min_extra, len(extras), frames[best_idx].photo.path.name,
             )
     else:
         diag.unresolved_problems = len(problems)
