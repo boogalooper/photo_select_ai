@@ -15,7 +15,7 @@ from app.paths import ROOT
 from app.utils.cuda_runtime import cuda_runtime_versions, prepare_windows_cuda_dlls
 
 
-def _gpu_name() -> str:
+def _nvidia_info() -> str | None:
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"],
@@ -23,9 +23,10 @@ def _gpu_name() -> str:
             stderr=subprocess.STDOUT,
             timeout=15,
         )
-        return out.strip().splitlines()[0]
+        line = out.strip().splitlines()[0] if out.strip() else ""
+        return line or "NVIDIA GPU detected"
     except Exception:
-        return "NVIDIA GPU (nvidia-smi details unavailable)"
+        return None
 
 
 def _run_model(ort, model: Path, shape: tuple[int, int, int, int]) -> None:
@@ -47,7 +48,11 @@ def _run_model(ort, model: Path, shape: tuple[int, int, int, int]) -> None:
 
 def main() -> int:
     print("CUDA self-test for Photo Select AI")
-    print("GPU:", _gpu_name())
+    gpu_info = _nvidia_info()
+    if gpu_info is None:
+        print("CUDA self-test SKIPPED: no NVIDIA GPU/driver detected by nvidia-smi.")
+        return 0
+    print("GPU:", gpu_info)
     info = prepare_windows_cuda_dlls()
     print("NVIDIA DLL directories:", len(info.get("directories", [])))
     print("Explicitly preloaded:", ", ".join(info.get("loaded", [])) or "none")

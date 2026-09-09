@@ -14,7 +14,7 @@ if exist "config\ca-bundle.pem" (
 )
 
 echo ==============================================
-echo Photo Select AI - installation v0.5.9
+echo Photo Select AI - installation v0.7.1
 echo Private Python: CPython 3.11.16 x64 via uv
 echo System Python and winget are not used.
 echo ==============================================
@@ -51,6 +51,30 @@ if not exist "app\tools\repair_venv.ps1" (
   echo ERROR: app\tools\repair_venv.ps1 is missing.
   goto :install_failed
 )
+if not exist "app\tools\install_windows.ps1" (
+  echo ERROR: app\tools\install_windows.ps1 is missing.
+  goto :install_failed
+)
+if not exist "app\tools\install_runtime.py" (
+  echo ERROR: app\tools\install_runtime.py is missing.
+  goto :install_failed
+)
+if not exist "app\tools\model_selftest.py" (
+  echo ERROR: app\tools\model_selftest.py is missing.
+  goto :install_failed
+)
+if not exist "app\tools\dependency_selftest.py" (
+  echo ERROR: app\tools\dependency_selftest.py is missing.
+  goto :install_failed
+)
+if not exist "app\tools\cuda_selftest.py" (
+  echo ERROR: app\tools\cuda_selftest.py is missing.
+  goto :install_failed
+)
+if not exist "app\requirements.txt" (
+  echo ERROR: app\requirements.txt is missing.
+  goto :install_failed
+)
 
 echo.
 echo Preparing private Python. No system Python is required...
@@ -78,15 +102,20 @@ rem Remove distributions that are no longer part of the current InsightFace buil
 "%PY%" -m pip uninstall -y mediapipe opencv-python-headless >nul 2>nul
 if "%PHOTOSELECT_PIP_INSECURE_PYPI%"=="1" (
   echo Installing application dependencies in Kaspersky compatibility mode...
-  "%PY%" -m pip install --index-url https://pypi.org/simple --trusted-host pypi.org --trusted-host files.pythonhosted.org -r "app\requirements.txt"
+  "%PY%" -m pip install --no-deps --index-url https://pypi.org/simple --trusted-host pypi.org --trusted-host files.pythonhosted.org -r "app\requirements.txt"
 ) else (
   echo Installing application dependencies with normal TLS verification...
-  "%PY%" -m pip install -r "app\requirements.txt"
+  "%PY%" -m pip install --no-deps -r "app\requirements.txt"
 )
 if errorlevel 1 goto :pip_failed
 
 "%PY%" "app\tools\install_runtime.py"
 if errorlevel 1 goto :runtime_failed
+echo.
+echo Verifying application Python dependencies and pip consistency...
+"%PY%" "app\tools\dependency_selftest.py"
+if errorlevel 1 goto :install_failed
+"%PY%" -m pip freeze --all > "runtime\installed_packages.txt"
 goto :download_models
 
 :pip_failed
@@ -127,17 +156,33 @@ if errorlevel 2 goto :install_failed
 set "PHOTOSELECT_PIP_INSECURE_PYPI=1"
 "%PY%" "app\tools\install_runtime.py"
 if errorlevel 1 goto :install_failed
+echo.
+echo Verifying application Python dependencies and pip consistency...
+"%PY%" "app\tools\dependency_selftest.py"
+if errorlevel 1 goto :install_failed
+"%PY%" -m pip freeze --all > "runtime\installed_packages.txt"
 goto :download_models
 
 :download_models
-if exist "models\insightface\models\buffalo_l\det_10g.onnx" if exist "models\insightface\models\buffalo_l\w600k_r50.onnx" if exist "models\insightface\models\buffalo_l\2d106det.onnx" goto :models_ready
-
 echo.
-echo Downloading/verifying InsightFace buffalo_l through Windows PowerShell...
-"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "app\tools\install_windows.ps1" -Action download-insightface
+echo Installing/verifying ALL neural models through Windows PowerShell...
+echo   - complete InsightFace buffalo_l pack ^(5 ONNX models^)
+echo   - portrait preference ResNet-18 ^(Caffe model + prototxt^)
+"%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "app\tools\install_windows.ps1" -Action download-models -ForceModels
 if errorlevel 1 goto :install_failed
 
-:models_ready
+echo.
+echo Running full CPU validation of every installed model...
+"%PY%" "app\tools\model_selftest.py" --full --write-manifest
+if errorlevel 1 (
+  echo.
+  echo Model validation failed. Re-downloading ALL models once as a clean recovery...
+  "%POWERSHELL_EXE%" -NoProfile -ExecutionPolicy Bypass -File "app\tools\install_windows.ps1" -Action download-models -ForceModels
+  if errorlevel 1 goto :install_failed
+  "%PY%" "app\tools\model_selftest.py" --full --write-manifest
+  if errorlevel 1 goto :install_failed
+)
+
 "%PY%" -m compileall -q app
 if errorlevel 1 goto :install_failed
 
@@ -168,7 +213,9 @@ if "%PHOTOSELECT_PIP_INSECURE_PYPI%"=="1" (
   echo Python package downloads used normal TLS certificate verification.
 )
 echo PowerShell model downloads used the Windows certificate store.
-echo InsightFace model archive is SHA-256 verified.
+echo Complete InsightFace buffalo_l archive is SHA-256 verified and all 5 ONNX models are validated on CPU.
+echo Public portrait-preference model source is pinned to an immutable upstream commit and validated with OpenCV DNN.
+echo Its SHA-256 values are recorded in the model manifest; runtime can fall back safely if FBP is later unavailable.
 echo Old MediaPipe package/model remnants were removed.
 echo CUDA 12.8 runtime components are pinned and Windows DLL paths are configured at runtime.
 echo.

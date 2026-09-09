@@ -1,9 +1,11 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("bootstrap-pip", "download-insightface", "tls-test")]
+    [ValidateSet("bootstrap-pip", "download-models", "download-insightface", "download-portrait-preference", "tls-test")]
     [string]$Action,
 
-    [string]$Python = ""
+    [string]$Python = "",
+
+    [switch]$ForceModels
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +26,16 @@ $InsightFacePack = Join-Path $InsightFaceRoot "buffalo_l"
 $InsightFaceZip = Join-Path $Root "runtime\downloads\buffalo_l.zip"
 $InsightFaceUrl = "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
 $InsightFaceSha256 = "80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f"
+$PortraitPreferenceDir = Join-Path $ModelDir "portrait_preference"
+$PortraitPreferenceModel = Join-Path $PortraitPreferenceDir "beauty_resnet.caffemodel"
+$PortraitPreferenceProto = Join-Path $PortraitPreferenceDir "beauty_resnet.prototxt"
+# Pin the archived HowCuteAmI source to the exact commit that introduced these
+# model files. This prevents a moving branch from silently changing installer
+# inputs. The installer also records SHA-256 values for the downloaded pair,
+# and model_selftest writes them into the application model manifest.
+$PortraitPreferenceSourceCommit = "e93ff99a3a3bf27694d6fa0b6d66dae5cb651d0c"
+$PortraitPreferenceModelUrl = "https://raw.githubusercontent.com/asiryan/HowCuteAmI/$PortraitPreferenceSourceCommit/models/beauty_resnet.caffemodel"
+$PortraitPreferenceProtoUrl = "https://raw.githubusercontent.com/asiryan/HowCuteAmI/$PortraitPreferenceSourceCommit/models/beauty_resnet.prototxt"
 
 function Invoke-WindowsDownload {
     param(
@@ -57,7 +69,8 @@ function Test-WindowsTls {
     Write-Host "Testing HTTPS through the Windows certificate store..."
     $targets = @(
         "https://pypi.org/pypi/pip/json",
-        "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip"
+        "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+        $PortraitPreferenceProtoUrl
     )
     foreach ($uri in $targets) {
         try {
@@ -76,13 +89,20 @@ function Test-WindowsTls {
     }
 }
 
-function Get-LatestUniversalWheel {
-    param([Parameter(Mandatory = $true)][string]$Package)
+function Get-PinnedUniversalWheel {
+    param(
+        [Parameter(Mandatory = $true)][string]$Package,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
 
+    # The application itself deliberately stays on CPython 3.11.16. Do not let
+    # a future bootstrap-tool release silently raise its Python requirement and
+    # break an otherwise reproducible installer. The selected releases are
+    # verified from PyPI metadata and their wheel SHA-256 before installation.
     $apiUrl = "https://pypi.org/pypi/$Package/json"
-    Write-Host "Reading PyPI metadata for $Package through Windows TLS..."
+    Write-Host "Reading PyPI metadata for pinned $Package $Version through Windows TLS..."
     $meta = Invoke-RestMethod -Uri $apiUrl -TimeoutSec 60
-    $version = [string]$meta.info.version
+    $version = $Version
     $releaseProperty = $meta.releases.PSObject.Properties[$version]
     if ($null -eq $releaseProperty) {
         throw "PyPI metadata did not contain release $version for $Package"
@@ -122,8 +142,14 @@ function Bootstrap-Pip {
     $downloaded = @{}
     # wheel 0.48+ depends on packaging>=24.0. Keep the complete small
     # bootstrap set local so the resolver never needs HTTPS at this stage.
-    foreach ($package in @("pip", "setuptools", "packaging", "wheel")) {
-        $item = Get-LatestUniversalWheel -Package $package
+    $bootstrapPackages = [ordered]@{
+        "pip" = "26.2.1"
+        "setuptools" = "84.0.0"
+        "packaging" = "26.3"
+        "wheel" = "0.48.0"
+    }
+    foreach ($package in $bootstrapPackages.Keys) {
+        $item = Get-PinnedUniversalWheel -Package $package -Version $bootstrapPackages[$package]
         $destination = Join-Path $BootstrapDir $item.FileName
         Write-Host "Downloading $($item.Package) $($item.Version) using Windows TLS..."
         Invoke-WindowsDownload -Uri $item.Url -OutFile $destination
@@ -157,12 +183,101 @@ function Bootstrap-Pip {
     Remove-Item -Recurse -Force $BootstrapDir -ErrorAction SilentlyContinue
 }
 
+function Download-PortraitPreference {
+    $modelOk = (Test-Path -LiteralPath $PortraitPreferenceModel -PathType Leaf) -and ((Get-Item $PortraitPreferenceModel).Length -gt 40000000)
+    $protoOk = (Test-Path -LiteralPath $PortraitPreferenceProto -PathType Leaf) -and ((Get-Item $PortraitPreferenceProto).Length -gt 10000)
+    if (-not $ForceModels -and $modelOk -and $protoOk) {
+        Write-Host "Portrait preference model already present: $PortraitPreferenceDir"
+        return
+    }
+
+    $stageDir = Join-Path $Root "runtime\downloads\portrait_preference_stage"
+    $stageModel = Join-Path $stageDir "beauty_resnet.caffemodel"
+    $stageProto = Join-Path $stageDir "beauty_resnet.prototxt"
+    $backupDir = Join-Path $ModelDir "portrait_preference_backup"
+    Remove-Item -Recurse -Force $stageDir -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $backupDir -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+
+    try {
+        Write-Host "Downloading public HowCuteAmI ResNet-18 portrait preference model..."
+        Invoke-WindowsDownload -Uri $PortraitPreferenceProtoUrl -OutFile $stageProto
+        Invoke-WindowsDownload -Uri $PortraitPreferenceModelUrl -OutFile $stageModel
+
+        if ((Get-Item $stageModel).Length -le 40000000) {
+            throw "Downloaded portrait preference model is unexpectedly small or incomplete"
+        }
+        if ((Get-Item $stageProto).Length -le 10000) {
+            throw "Downloaded portrait preference prototxt is unexpectedly small or incomplete"
+        }
+
+        $modelSha = (Get-FileHash -Algorithm SHA256 -Path $stageModel).Hash.ToLowerInvariant()
+        $protoSha = (Get-FileHash -Algorithm SHA256 -Path $stageProto).Hash.ToLowerInvariant()
+        $sourceIntegrity = [ordered]@{
+            source_commit = $PortraitPreferenceSourceCommit
+            files = [ordered]@{
+                "beauty_resnet.caffemodel" = $modelSha
+                "beauty_resnet.prototxt" = $protoSha
+            }
+        }
+        $sourceIntegrity | ConvertTo-Json -Depth 4 | Set-Content -Encoding UTF8 (Join-Path $stageDir "source_integrity.json")
+        Write-Host "  FBP source pinned to commit $PortraitPreferenceSourceCommit"
+        Write-Host "  SHA-256 model: $modelSha"
+        Write-Host "  SHA-256 proto: $protoSha"
+
+        # Swap the complete two-file model directory only after both downloads
+        # have passed validation. This keeps the previous working model intact
+        # if the network fails or disk copy is interrupted.
+        New-Item -ItemType Directory -Force -Path $ModelDir | Out-Null
+        $hadOldDir = Test-Path -LiteralPath $PortraitPreferenceDir -PathType Container
+        if ($hadOldDir) {
+            Move-Item -LiteralPath $PortraitPreferenceDir -Destination $backupDir
+        }
+        try {
+            Move-Item -LiteralPath $stageDir -Destination $PortraitPreferenceDir
+        }
+        catch {
+            Remove-Item -Recurse -Force $PortraitPreferenceDir -ErrorAction SilentlyContinue
+            if ($hadOldDir -and (Test-Path -LiteralPath $backupDir -PathType Container)) {
+                Move-Item -LiteralPath $backupDir -Destination $PortraitPreferenceDir
+            }
+            throw
+        }
+        Remove-Item -Recurse -Force $backupDir -ErrorAction SilentlyContinue
+        Write-Host "Portrait preference model installed: $PortraitPreferenceDir"
+    }
+    finally {
+        Remove-Item -Recurse -Force $stageDir -ErrorAction SilentlyContinue
+        if ((Test-Path -LiteralPath $PortraitPreferenceDir -PathType Container) -and
+            (Test-Path -LiteralPath $backupDir -PathType Container)) {
+            Remove-Item -Recurse -Force $backupDir -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+
 function Download-InsightFace {
-    $detector = Join-Path $InsightFacePack "det_10g.onnx"
-    $recognizer = Join-Path $InsightFacePack "w600k_r50.onnx"
-    $landmarks = Join-Path $InsightFacePack "2d106det.onnx"
-    if ((Test-Path $detector) -and (Test-Path $recognizer) -and (Test-Path $landmarks)) {
-        Write-Host "InsightFace buffalo_l already present: $InsightFacePack"
+    $required = @(
+        "det_10g.onnx",
+        "w600k_r50.onnx",
+        "2d106det.onnx",
+        "1k3d68.onnx",
+        "genderage.onnx"
+    )
+    $packOk = $true
+    foreach ($name in $required) {
+        $path = Join-Path $InsightFacePack $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $packOk = $false
+            break
+        }
+        if ((Get-Item -LiteralPath $path).Length -lt 100000) {
+            $packOk = $false
+            break
+        }
+    }
+    if (-not $ForceModels -and $packOk) {
+        Write-Host "Complete InsightFace buffalo_l pack already present: $InsightFacePack"
         return
     }
 
@@ -170,46 +285,91 @@ function Download-InsightFace {
     New-Item -ItemType Directory -Force -Path $downloadDir | Out-Null
     Remove-Item -Force $InsightFaceZip -ErrorAction SilentlyContinue
 
-    Write-Host "Downloading official InsightFace buffalo_l model pack using Windows TLS..."
-    Invoke-WindowsDownload -Uri $InsightFaceUrl -OutFile $InsightFaceZip
-    Test-FileHash -Path $InsightFaceZip -ExpectedSha256 $InsightFaceSha256
-    Write-Host "  SHA-256 OK: buffalo_l.zip"
-
-    $extract = Join-Path $Root "runtime\\downloads\\buffalo_l_extract"
+    $extract = Join-Path $Root "runtime\downloads\buffalo_l_extract"
+    $stagePack = Join-Path $InsightFaceRoot "buffalo_l_stage"
+    $backupPack = Join-Path $InsightFaceRoot "buffalo_l_backup"
     Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $extract | Out-Null
-    Expand-Archive -Path $InsightFaceZip -DestinationPath $extract -Force
+    Remove-Item -Recurse -Force $stagePack -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $backupPack -ErrorAction SilentlyContinue
 
-    $source = $extract
-    if (Test-Path (Join-Path $extract "buffalo_l")) {
-        $source = Join-Path $extract "buffalo_l"
-    }
-    if (-not (Test-Path (Join-Path $source "det_10g.onnx"))) {
-        throw "Downloaded buffalo_l archive does not contain det_10g.onnx"
-    }
-    if (-not (Test-Path (Join-Path $source "w600k_r50.onnx"))) {
-        throw "Downloaded buffalo_l archive does not contain w600k_r50.onnx"
-    }
-    if (-not (Test-Path (Join-Path $source "2d106det.onnx"))) {
-        throw "Downloaded buffalo_l archive does not contain 2d106det.onnx"
-    }
+    try {
+        Write-Host "Downloading official InsightFace buffalo_l model pack using Windows TLS..."
+        Invoke-WindowsDownload -Uri $InsightFaceUrl -OutFile $InsightFaceZip
+        Test-FileHash -Path $InsightFaceZip -ExpectedSha256 $InsightFaceSha256
+        Write-Host "  SHA-256 OK: buffalo_l.zip"
 
-    New-Item -ItemType Directory -Force -Path $InsightFaceRoot | Out-Null
-    Remove-Item -Recurse -Force $InsightFacePack -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $InsightFacePack | Out-Null
-    Get-ChildItem -Path $source -File | ForEach-Object {
-        Copy-Item -Force $_.FullName (Join-Path $InsightFacePack $_.Name)
-    }
+        New-Item -ItemType Directory -Force -Path $extract | Out-Null
+        Expand-Archive -Path $InsightFaceZip -DestinationPath $extract -Force
 
-    Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
-    Remove-Item -Force $InsightFaceZip -ErrorAction SilentlyContinue
-    Write-Host "InsightFace model installed: $InsightFacePack"
+        $source = $extract
+        if (Test-Path (Join-Path $extract "buffalo_l")) {
+            $source = Join-Path $extract "buffalo_l"
+        }
+        foreach ($name in $required) {
+            $sourceFile = Join-Path $source $name
+            if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
+                throw "Downloaded buffalo_l archive does not contain $name"
+            }
+            if ((Get-Item -LiteralPath $sourceFile).Length -lt 100000) {
+                throw "Downloaded buffalo_l file is unexpectedly small: $name"
+            }
+        }
+
+        # Stage the complete pack before touching the working model directory.
+        # A failed download/extraction/copy therefore leaves the last working
+        # buffalo_l untouched. The directory swap below also has a rollback.
+        New-Item -ItemType Directory -Force -Path $InsightFaceRoot | Out-Null
+        New-Item -ItemType Directory -Force -Path $stagePack | Out-Null
+        Get-ChildItem -Path $source -File | ForEach-Object {
+            Copy-Item -Force $_.FullName (Join-Path $stagePack $_.Name)
+        }
+        foreach ($name in $required) {
+            $stageFile = Join-Path $stagePack $name
+            if (-not (Test-Path -LiteralPath $stageFile -PathType Leaf) -or
+                (Get-Item -LiteralPath $stageFile).Length -lt 100000) {
+                throw "Staged buffalo_l pack is incomplete: $name"
+            }
+        }
+
+        $hadOldPack = Test-Path -LiteralPath $InsightFacePack -PathType Container
+        if ($hadOldPack) {
+            Move-Item -LiteralPath $InsightFacePack -Destination $backupPack
+        }
+        try {
+            Move-Item -LiteralPath $stagePack -Destination $InsightFacePack
+        }
+        catch {
+            Remove-Item -Recurse -Force $InsightFacePack -ErrorAction SilentlyContinue
+            if ($hadOldPack -and (Test-Path -LiteralPath $backupPack -PathType Container)) {
+                Move-Item -LiteralPath $backupPack -Destination $InsightFacePack
+            }
+            throw
+        }
+        Remove-Item -Recurse -Force $backupPack -ErrorAction SilentlyContinue
+        Write-Host "InsightFace model installed: $InsightFacePack"
+    }
+    finally {
+        Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $stagePack -ErrorAction SilentlyContinue
+        Remove-Item -Force $InsightFaceZip -ErrorAction SilentlyContinue
+        # Keep backup only if an unexpected rollback problem occurred; never
+        # silently delete the last known-good pack in that situation.
+        if ((Test-Path -LiteralPath $InsightFacePack -PathType Container) -and
+            (Test-Path -LiteralPath $backupPack -PathType Container)) {
+            Remove-Item -Recurse -Force $backupPack -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 try {
     switch ($Action) {
         "bootstrap-pip" { Bootstrap-Pip }
+        "download-models" {
+            Download-InsightFace
+            Download-PortraitPreference
+        }
         "download-insightface" { Download-InsightFace }
+        "download-portrait-preference" { Download-PortraitPreference }
         "tls-test" { Test-WindowsTls }
     }
     exit 0

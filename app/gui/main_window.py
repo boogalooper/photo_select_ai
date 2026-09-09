@@ -8,64 +8,15 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from app import __version__
-from app.core.config import load_ui_state, merged_config, save_ui_state
+from app.core.config import UI_STATE_VERSION, load_ui_state, merged_config, save_ui_state
 from app.core.pipeline import AnalysisPipeline, CancelledError
 from app.core.scanner import count_supported_photos
 from app.gui.tooltip import ToolTip
 from app.utils.hardware import detect_hardware
 
 
-SELECTION_PROFILES: dict[str, dict[str, float | bool]] = {
-    "Сбалансированный": {
-        "eye_threshold": 0.52,
-        "prefer_open_eyes": True,
-        "eyes_weight": 1.80,
-        "closed_eye_penalty": 0.45,
-        "eye_sharpness_weight": 1.40,
-        "face_sharpness_weight": 0.90,
-        "expression_weight": 0.70,
-        "smile_weight": 0.35,
-        "technical_weight": 0.35,
-    },
-    "Глаза и фокус": {
-        "eye_threshold": 0.52,
-        "prefer_open_eyes": True,
-        "eyes_weight": 2.20,
-        "closed_eye_penalty": 0.65,
-        "eye_sharpness_weight": 1.80,
-        "face_sharpness_weight": 1.10,
-        "expression_weight": 0.55,
-        "smile_weight": 0.20,
-        "technical_weight": 0.35,
-    },
-    "Выражение и улыбка": {
-        "eye_threshold": 0.50,
-        "prefer_open_eyes": True,
-        "eyes_weight": 1.60,
-        "closed_eye_penalty": 0.40,
-        "eye_sharpness_weight": 1.20,
-        "face_sharpness_weight": 0.80,
-        "expression_weight": 1.15,
-        "smile_weight": 0.80,
-        "technical_weight": 0.30,
-    },
-    "Без приоритета улыбки": {
-        "eye_threshold": 0.52,
-        "prefer_open_eyes": True,
-        "eyes_weight": 1.85,
-        "closed_eye_penalty": 0.50,
-        "eye_sharpness_weight": 1.45,
-        "face_sharpness_weight": 0.95,
-        "expression_weight": 0.80,
-        "smile_weight": 0.00,
-        "technical_weight": 0.35,
-    },
-}
-SELECTION_CUSTOM = "Пользовательский"
-
 SERIES_PROFILES: dict[str, dict[str, object]] = {
     "Сбалансированный": {
-        "series_algorithm": "dbscan",
         "dbscan_distance": 0.27,
         "dbscan_min_samples": 2,
         "segment_merge_distance": 0.32,
@@ -83,7 +34,6 @@ SERIES_PROFILES: dict[str, dict[str, object]] = {
         "face_min_pct": 0.05,
     },
     "Меньше повторов": {
-        "series_algorithm": "dbscan",
         "dbscan_distance": 0.27,
         "dbscan_min_samples": 2,
         "segment_merge_distance": 0.34,
@@ -101,7 +51,6 @@ SERIES_PROFILES: dict[str, dict[str, object]] = {
         "face_min_pct": 0.05,
     },
     "Строже к случайным кадрам": {
-        "series_algorithm": "dbscan",
         "dbscan_distance": 0.27,
         "dbscan_min_samples": 2,
         "segment_merge_distance": 0.32,
@@ -119,7 +68,6 @@ SERIES_PROFILES: dict[str, dict[str, object]] = {
         "face_min_pct": 0.05,
     },
     "Чувствительнее к сложным лицам": {
-        "series_algorithm": "dbscan",
         "dbscan_distance": 0.28,
         "dbscan_min_samples": 2,
         "segment_merge_distance": 0.33,
@@ -138,52 +86,6 @@ SERIES_PROFILES: dict[str, dict[str, object]] = {
     },
 }
 SERIES_CUSTOM = "Пользовательский"
-
-GROUP_RULE_PROFILES: dict[str, dict[str, float | int | bool]] = {
-    "Глаза прежде всего": {
-        "prioritize_open_eyes_main": True,
-        "eye_problem_threshold": 0.62,
-        "eye_candidate_threshold": 0.68,
-        "eye_improvement_margin": 0.06,
-        "good_face_threshold": 0.62,
-        "headswap_min_eye_sharpness": 0.35,
-        "headswap_candidate_min_quality": 0.52,
-        "quality_improvement_margin": 0.10,
-        "backup_min_score_ratio": 0.86,
-        "backup_person_improvement_margin": 0.05,
-        "min_extra_candidates": 1,
-        "max_extra_candidates": 3,
-    },
-    "Сбалансированный": {
-        "prioritize_open_eyes_main": True,
-        "eye_problem_threshold": 0.58,
-        "eye_candidate_threshold": 0.64,
-        "eye_improvement_margin": 0.08,
-        "good_face_threshold": 0.62,
-        "headswap_min_eye_sharpness": 0.35,
-        "headswap_candidate_min_quality": 0.52,
-        "quality_improvement_margin": 0.12,
-        "backup_min_score_ratio": 0.88,
-        "backup_person_improvement_margin": 0.06,
-        "min_extra_candidates": 1,
-        "max_extra_candidates": 3,
-    },
-    "Больше резервных кадров": {
-        "prioritize_open_eyes_main": True,
-        "eye_problem_threshold": 0.60,
-        "eye_candidate_threshold": 0.66,
-        "eye_improvement_margin": 0.06,
-        "good_face_threshold": 0.60,
-        "headswap_min_eye_sharpness": 0.32,
-        "headswap_candidate_min_quality": 0.48,
-        "quality_improvement_margin": 0.08,
-        "backup_min_score_ratio": 0.80,
-        "backup_person_improvement_margin": 0.04,
-        "min_extra_candidates": 2,
-        "max_extra_candidates": 3,
-    },
-}
-GROUP_PROFILE_DEFAULT = "Глаза прежде всего"
 
 PORTRAIT_REPEAT_MODES = {
     "Обычный — RED на каждую серию": "off",
@@ -204,19 +106,6 @@ class MainWindow(tk.Tk):
         self.minsize(900, min(600, window_h))
         self.base_config = config
         self.state_data = load_ui_state()
-        if int(self.state_data.get("state_version", 1)) < 3:
-            self.state_data = {
-                key: self.state_data[key]
-                for key in ("folder", "scheme", "custom_red")
-                if key in self.state_data
-            }
-        if int(self.state_data.get("state_version", 1)) < 4:
-            if str(self.state_data.get("cuda_conv_algo", "")).upper() == "DEFAULT":
-                self.state_data["cuda_conv_algo"] = "HEURISTIC"
-        if int(self.state_data.get("state_version", 1)) < 5:
-            if int(self.state_data.get("min_frames", 1)) <= 1:
-                self.state_data["min_frames"] = int(config["series"].get("min_frames", 2))
-
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.cancel_event = threading.Event()
@@ -231,7 +120,6 @@ class MainWindow(tk.Tk):
         # settings that do not affect the current mode/algorithm.
         self._dbscan_only_widgets: list[tk.Widget] = []
         self._sequential_only_widgets: list[tk.Widget] = []
-        self._highres_option_widgets: list[tk.Widget] = []
         self._camera_attention_option_widgets: list[tk.Widget] = []
         self._camera_attention_detector_widgets: list[tk.Widget] = []
         self._yellow_option_widgets: list[tk.Widget] = []
@@ -248,36 +136,25 @@ class MainWindow(tk.Tk):
             return self.state_data.get(name, default)
 
         self.folder_var = tk.StringVar(value=initial_folder or saved("folder", ""))
-        self.mode_var = tk.StringVar(value=saved("mode", config.get("runtime", {}).get("mode", "portrait")))
+        saved_mode = str(saved("mode", config.get("runtime", {}).get("mode", "portrait"))).lower()
+        self.mode_var = tk.StringVar(value=saved_mode if saved_mode in {"portrait", "group"} else "portrait")
         self.preview_var = tk.IntVar(value=int(saved("preview", config["preview"]["portrait_long_edge"])))
         self.group_preview_var = tk.IntVar(value=int(saved("group_preview", config["preview"].get("group_long_edge", 3200))))
         self.scheme_var = tk.StringVar(value=saved("scheme", config["xmp"]["scheme"]))
         self.custom_red_var = tk.StringVar(value=saved("custom_red", config["xmp"]["custom_red"]))
         self.custom_yellow_var = tk.StringVar(value=saved("custom_yellow", config["xmp"].get("custom_yellow", "Second")))
-        self.clear_red_var = tk.BooleanVar(value=bool(saved("clear_red_before_run", config["xmp"].get("clear_red_before_run", True))))
-        self.clear_yellow_var = tk.BooleanVar(value=bool(saved("clear_yellow_before_run", config["xmp"].get("clear_yellow_before_run", True))))
         self.group_find_candidates_var = tk.BooleanVar(value=bool(saved("group_find_candidates", config.get("group", {}).get("find_headswap_candidates", True))))
         self.group_max_extra_var = tk.IntVar(value=int(saved("group_max_extra", config.get("group", {}).get("max_extra_candidates", 3))))
         self.group_min_extra_var = tk.IntVar(value=int(saved("group_min_extra", config.get("group", {}).get("min_extra_candidates", 1))))
         self.group_min_people_var = tk.IntVar(value=int(saved("group_min_people", config.get("group", {}).get("min_people", 4))))
-        self.group_highres_rescue_var = tk.BooleanVar(value=bool(saved("group_highres_rescue", config.get("group", {}).get("highres_rescue_enabled", False))))
         self.group_det_size_var = tk.IntVar(value=int(saved("group_det_size", config.get("analysis", {}).get("insightface_det_size_group", 1024))))
         self.group_det_thresh_var = tk.DoubleVar(value=float(saved("group_det_thresh", config.get("analysis", {}).get("insightface_det_thresh_group", 0.22))))
         self.group_min_face_pct_var = tk.DoubleVar(value=float(saved("group_min_face_pct", config.get("group", {}).get("min_track_face_fraction", 0.00035) * 100.0)))
-        self.group_highres_det_size_var = tk.IntVar(value=int(saved("group_highres_det_size", config.get("group", {}).get("highres_rescue_det_size", 1536))))
-        self.group_highres_det_thresh_var = tk.DoubleVar(value=float(saved("group_highres_det_thresh", config.get("group", {}).get("highres_rescue_det_thresh", 0.14))))
-        self.group_highres_min_face_pct_var = tk.DoubleVar(value=float(saved("group_highres_min_face_pct", config.get("group", {}).get("highres_rescue_min_face_fraction", 0.00018) * 100.0)))
-        self.group_highres_min_presence_var = tk.IntVar(value=int(saved("group_highres_min_presence", config.get("group", {}).get("highres_rescue_min_presence", 2))))
         self.group_camera_attention_var = tk.BooleanVar(value=bool(saved("group_camera_attention", config.get("group", {}).get("camera_attention_enabled", False))))
-        self.group_camera_attention_shortlist_var = tk.IntVar(value=int(saved("group_camera_attention_shortlist", config.get("group", {}).get("camera_attention_shortlist", 3))))
+        self.group_camera_attention_shortlist_var = tk.IntVar(value=int(saved("group_camera_attention_shortlist", config.get("group", {}).get("camera_attention_shortlist", 5))))
         self.group_camera_attention_preview_var = tk.IntVar(value=int(saved("group_camera_attention_preview", config.get("group", {}).get("camera_attention_preview_long_edge", 4800))))
         self.group_camera_attention_det_size_var = tk.IntVar(value=int(saved("group_camera_attention_det_size", config.get("group", {}).get("camera_attention_det_size", 1280))))
         self.group_camera_attention_min_eye_px_var = tk.DoubleVar(value=float(saved("group_camera_attention_min_eye_px", config.get("group", {}).get("camera_attention_min_eye_px", 14.0))))
-        self.group_camera_attention_away_penalty_var = tk.DoubleVar(value=float(saved("group_camera_attention_away_penalty", config.get("group", {}).get("camera_attention_away_penalty", 0.45))))
-        self.group_profile_var = tk.StringVar(value=str(saved("group_profile", GROUP_PROFILE_DEFAULT)))
-        if self.group_profile_var.get() not in GROUP_RULE_PROFILES:
-            self.group_profile_var.set(GROUP_PROFILE_DEFAULT)
-        self.group_profile_desc_var = tk.StringVar()
         self.provider_var = tk.StringVar(value=saved("insightface_provider", config["analysis"].get("insightface_provider", "auto")))
         self.cuda_algo_var = tk.StringVar(value=saved("cuda_conv_algo", config["analysis"].get("insightface_cuda_conv_algo", "HEURISTIC")))
         self.cuda_fallback_var = tk.BooleanVar(value=bool(saved("cuda_fallback", config["analysis"].get("insightface_cuda_fallback_cpu", True))))
@@ -350,11 +227,7 @@ class MainWindow(tk.Tk):
         if saved_repeat_mode in PORTRAIT_REPEAT_MODES:
             repeat_mode_label = saved_repeat_mode
         else:
-            legacy_repeat = {
-                "red_yellow": "best_red_pose_yellow",
-                "first_red_rest_yellow": "best_red_pose_yellow",
-            }.get(saved_repeat_mode.lower(), saved_repeat_mode.lower())
-            repeat_mode_label = PORTRAIT_REPEAT_CODES.get(legacy_repeat, PORTRAIT_REPEAT_CODES["off"])
+            repeat_mode_label = PORTRAIT_REPEAT_CODES.get(saved_repeat_mode.lower(), PORTRAIT_REPEAT_CODES["off"])
         self.repeat_pose_mode_var = tk.StringVar(value=repeat_mode_label)
         self.repeat_pose_max_series_gap_var = tk.IntVar(value=int(saved("repeat_pose_max_series_gap", p.get("repeat_pose_max_series_gap", 3))))
         self.repeat_pose_max_seconds_var = tk.DoubleVar(value=float(saved("repeat_pose_max_seconds", p.get("repeat_pose_max_seconds", 180.0))))
@@ -372,19 +245,9 @@ class MainWindow(tk.Tk):
         self.repeat_pose_center_shift_var = tk.DoubleVar(value=float(saved("repeat_pose_center_shift", p.get("repeat_pose_min_center_shift", 0.11))))
         self.repeat_pose_scale_change_var = tk.DoubleVar(value=float(saved("repeat_pose_scale_change", p.get("repeat_pose_min_scale_change", 0.32))))
         self.eye_threshold_var = tk.DoubleVar(value=float(saved("eye_threshold", config["analysis"]["eye_open_threshold"])))
-        self.prefer_open_eyes_var = tk.BooleanVar(value=bool(saved("prefer_open_eyes", p.get("prefer_open_eyes", True))))
-        self.eyes_weight_var = tk.DoubleVar(value=float(saved("eyes_weight", p.get("eyes_weight", 1.8))))
-        self.closed_eye_penalty_var = tk.DoubleVar(value=float(saved("closed_eye_penalty", p.get("closed_eye_penalty", 0.45))))
-        self.eye_sharpness_weight_var = tk.DoubleVar(value=float(saved("eye_sharpness_weight", p.get("eye_sharpness_weight", 1.4))))
-        self.face_sharpness_weight_var = tk.DoubleVar(value=float(saved("face_sharpness_weight", p.get("face_sharpness_weight", 0.9))))
-        self.expression_weight_var = tk.DoubleVar(value=float(saved("expression_weight", p.get("expression_weight", 0.7))))
-        self.smile_weight_var = tk.DoubleVar(value=float(saved("smile_weight", p.get("smile_weight", 0.35))))
-        self.technical_weight_var = tk.DoubleVar(value=float(saved("technical_weight", p.get("technical_weight", 0.35))))
 
-        self.selection_profile_var = tk.StringVar(value=SELECTION_CUSTOM)
         self.series_profile_var = tk.StringVar(value=SERIES_CUSTOM)
         self.advanced_var = tk.BooleanVar(value=self._advanced_visible)
-        self.selection_profile_desc_var = tk.StringVar()
         self.series_profile_desc_var = tk.StringVar()
 
         self.progress_var = tk.DoubleVar(value=0.0)
@@ -399,7 +262,6 @@ class MainWindow(tk.Tk):
         self.series_algorithm_var.trace_add("write", lambda *_: self._apply_context_states())
         self.portrait_boundary_guard_var.trace_add("write", lambda *_: self._apply_context_states())
         self.repeat_pose_mode_var.trace_add("write", lambda *_: self._apply_context_states())
-        self.group_highres_rescue_var.trace_add("write", lambda *_: self._apply_context_states())
         self.group_camera_attention_var.trace_add("write", lambda *_: self._apply_context_states())
         self.group_find_candidates_var.trace_add("write", lambda *_: self._apply_context_states())
         self.scheme_var.trace_add("write", lambda *_: self._apply_context_states())
@@ -407,7 +269,6 @@ class MainWindow(tk.Tk):
         self.gpu_memory_safe_mode_var.trace_add("write", lambda *_: self._apply_context_states())
         self._apply_mode_ui()
         self._apply_context_states()
-        self.selection_profile_var.set(self._infer_selection_profile())
         self.series_profile_var.set(self._infer_series_profile())
         self._update_profile_descriptions()
         self._install_profile_traces()
@@ -483,14 +344,25 @@ class MainWindow(tk.Tk):
         ).pack(anchor="w")
         row += 1
 
-        row = self._combo_row(
-            tab,
-            row,
-            "Режим:",
-            self.mode_var,
-            ("portrait", "group"),
-            "portrait — выбрать лучший портрет. group — выбрать 1 главный групповой кадр и при необходимости дополнительные YELLOW для ручной коррекции.",
+        mode_box = ttk.LabelFrame(tab, text="Режим работы — выберите явно", padding=(10, 7))
+        mode_box.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        mode_box.columnconfigure(0, weight=1)
+        mode_box.columnconfigure(1, weight=1)
+        style = ttk.Style(self)
+        style.configure("Mode.TRadiobutton", font=("TkDefaultFont", 10, "bold"), padding=(8, 5))
+        portrait_radio = ttk.Radiobutton(
+            mode_box, text="ПОРТРЕТЫ — выбрать лучший портрет",
+            variable=self.mode_var, value="portrait", style="Mode.TRadiobutton",
         )
+        portrait_radio.grid(row=0, column=0, sticky="w", padx=(0, 20))
+        group_radio = ttk.Radiobutton(
+            mode_box, text="ГРУППЫ — выбрать лучший групповой кадр",
+            variable=self.mode_var, value="group", style="Mode.TRadiobutton",
+        )
+        group_radio.grid(row=0, column=1, sticky="w")
+        ToolTip(portrait_radio, "Портретный режим: разделение серий по человеку и выбор лучшего портрета.")
+        ToolTip(group_radio, "Групповой режим: один основной RED и, при необходимости, YELLOW-дубли для ручной коррекции.")
+        row += 1
 
         repeat_mode_row = row
         row = self._combo_row(
@@ -501,67 +373,39 @@ class MainWindow(tk.Tk):
             tuple(PORTRAIT_REPEAT_MODES),
             "Обычный режим ставит RED на каждую найденную серию. Режим разных поз связывает близкие серии одного ребёнка по ArcFace: один самый лучший кадр среди всех его серий получает RED, а YELLOW ставится только на лучшие кадры явно и сильно отличающихся поз. Само разделение DBSCAN/sequential не меняется.",
         )
-        repeat_clear_row = row
-        row = self._check_row(
-            tab,
-            row,
-            "Портреты — удалить все старые YELLOW при финальной записи:",
-            self.clear_yellow_var,
-            "Используется только в режиме «Один ребёнок / разные позы». После полного анализа программа сначала удаляет настроенную YELLOW со всех найденных файлов, включая кадры, которые будут выбраны снова, независимо от того, кто поставил метку. Затем записывает новый план. При отмене до финального commit XMP не изменяется; остальные XMP/Camera Raw данные сохраняются.",
-        )
-        self._portrait_repeat_basic_option_widgets.extend(self._grid_row_widgets(tab, repeat_clear_row))
-
         groups = ttk.LabelFrame(tab, text="Только режим «Группы»", padding=7)
         groups.grid(row=row, column=0, columnspan=3, sticky="ew", pady=(4, 6))
         self.group_settings_frame = groups
-        ttk.Label(groups, text="Профиль:").grid(row=0, column=0, sticky="w", pady=1)
-        gp = ttk.Combobox(groups, textvariable=self.group_profile_var, values=tuple(GROUP_RULE_PROFILES), state="readonly", width=24)
-        gp.grid(row=0, column=1, columnspan=2, sticky="w", padx=(4, 14), pady=1)
-        gp.bind("<<ComboboxSelected>>", lambda _e: self._on_group_profile_selected())
-        ToolTip(gp, "Рекомендуется: «Глаза прежде всего». Групповые правила хранятся отдельно от портретных и не меняют уже настроенный портретный отбор.")
-        ttk.Label(groups, textvariable=self.group_profile_desc_var, wraplength=520).grid(row=0, column=3, columnspan=4, sticky="w", padx=(4, 0))
-
-        ttk.Label(groups, text="Размер изображения для анализа:").grid(row=1, column=0, sticky="w", pady=1)
-        e1 = ttk.Entry(groups, textvariable=self.group_preview_var, width=7)
-        e1.grid(row=1, column=1, sticky="w", padx=(4, 12), pady=1)
-        ToolTip(e1, "Минимум: 1600\nМаксимум: 6000\nРекомендуется: 2800–4000\nПо умолчанию: 3200\n\nБольше → лучше видны маленькие лица, но анализ медленнее.")
-        ttk.Label(groups, text="Мин. лиц в группе:").grid(row=1, column=2, sticky="w", pady=1)
+        ttk.Label(
+            groups,
+            text="Пригодность фиксирована: открытые глаза, допустимый поворот головы, резкость и техническое качество проверяются раньше FBP.",
+            wraplength=820,
+        ).grid(row=0, column=0, columnspan=7, sticky="w", pady=(0, 4))
+        ttk.Label(groups, text="Мин. лиц в группе:").grid(row=1, column=0, sticky="w", pady=1)
         e2 = ttk.Entry(groups, textvariable=self.group_min_people_var, width=5)
-        e2.grid(row=1, column=3, sticky="w", padx=(4, 12), pady=1)
+        e2.grid(row=1, column=1, sticky="w", padx=(4, 16), pady=1)
         ToolTip(e2, "Минимум: 2\nМаксимум: 80\nРекомендуется: 4–10\nПо умолчанию: 4\n\nМинимум лиц, чтобы серия считалась групповой. Участниками могут быть и дети, и взрослые.")
-        ttk.Label(groups, text="YELLOW мин/макс:").grid(row=1, column=4, sticky="w", pady=1)
+        ttk.Label(groups, text="YELLOW мин/макс:").grid(row=1, column=2, sticky="w", pady=1)
         emin = ttk.Entry(groups, textvariable=self.group_min_extra_var, width=3)
-        emin.grid(row=1, column=5, sticky="w", padx=(4, 2), pady=1)
+        emin.grid(row=1, column=3, sticky="w", padx=(4, 2), pady=1)
         emax = ttk.Entry(groups, textvariable=self.group_max_extra_var, width=3)
-        emax.grid(row=1, column=6, sticky="w", padx=(2, 0), pady=1)
-        ToolTip(emin, "Минимум: 0\nМаксимум: 5\nРекомендуется: 1\nПо умолчанию: 1\n\nМинимальное число YELLOW для группы. Сначала алгоритм анализа ищет целевые кадры, исправляющие конкретные проблемы на RED; если их мало, добирает сильные резервные дубли до этого количества.")
-        ToolTip(emax, "Минимум: 0\nМаксимум: 5\nРекомендуется: 3\nПо умолчанию: 3\n\nМожно запросить до 5 YELLOW на одну групповую серию. Этот максимум используется непосредственно во время анализа: сначала выбираются YELLOW, закрывающие проблемы отдельных людей на RED, затем при необходимости добавляются резервные дубли до заданного минимума.")
+        emax.grid(row=1, column=4, sticky="w", padx=(2, 0), pady=1)
+        ToolTip(emin, "Минимум: 0\nМаксимум: 5\nРекомендуется: 1\nПо умолчанию: 1\n\nМинимальное число YELLOW для группы. Сначала ищутся кадры, исправляющие конкретные проблемы RED; если их мало, добавляются сильные резервные дубли.")
+        ToolTip(emax, "Минимум: 0\nМаксимум: 5\nРекомендуется: 3\nПо умолчанию: 3\n\nМаксимальное число YELLOW на групповую серию.")
         self._yellow_option_widgets.extend([emin, emax])
-        self._yellow_option_widgets.extend([w for w in groups.grid_slaves(row=1) if int(w.grid_info().get("column", 0)) >= 4])
+        self._yellow_option_widgets.extend([w for w in groups.grid_slaves(row=1) if int(w.grid_info().get("column", 0)) >= 2])
         c1 = ttk.Checkbutton(groups, text="Искать YELLOW / резервные дубли", variable=self.group_find_candidates_var)
-        c1.grid(row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
+        c1.grid(row=2, column=0, columnspan=5, sticky="w", pady=(3, 0))
         self.group_find_candidates_check = c1
-        ToolTip(c1, "Сначала в процессе анализа ищутся целевые YELLOW для конкретных проблем людей на RED. Затем, если их меньше заданного YELLOW минимума, добавляются сильные резервные дубли. Пользователь может разрешить до 5 YELLOW на одну групповую серию.")
-        c2 = ttk.Checkbutton(groups, text="Удалить все старые YELLOW при финальной записи", variable=self.clear_yellow_var)
-        c2.grid(row=2, column=4, columnspan=3, sticky="w", pady=(3, 0))
-        self.clear_yellow_check = c2
-        ToolTip(c2, "После полного анализа программа сначала удаляет настроенную YELLOW со всех найденных файлов, включая файлы, которые будут снова выбраны YELLOW/RED, независимо от происхождения метки. Затем записывает новый план. При отмене до commit XMP не изменяется; остальные XMP/Camera Raw данные сохраняются.")
-        c3 = ttk.Checkbutton(
+        ToolTip(c1, "Сначала ищутся целевые YELLOW для конкретных проблем людей на RED. Затем при необходимости добавляются сильные резервные дубли до заданного минимума.")
+        c2 = ttk.Checkbutton(
             groups,
-            text="Поиск маленьких лиц: улучшенный дополнительный проход (медленнее)",
-            variable=self.group_highres_rescue_var,
-        )
-        c3.grid(row=3, column=0, columnspan=7, sticky="w", pady=(4, 0))
-        self.group_highres_check = c3
-        ToolTip(c3, "Только для групп. Это соответствует улучшенному поиску маленьких лиц: после обычного прохода программа повторно анализирует уже найденные серии более чувствительным детектором. Может вернуть редкое пропущенное маленькое лицо, но заметно увеличивает время работы. Алгоритм состава группы и значения по умолчанию не изменены.")
-        c4 = ttk.Checkbutton(
-            groups,
-            text="Учитывать взгляд в камеру — финальная проверка лучших дублей (экспериментально)",
+            text="Учитывать взгляд в камеру — финальная проверка лучших дублей",
             variable=self.group_camera_attention_var,
         )
-        c4.grid(row=4, column=0, columnspan=7, sticky="w", pady=(4, 0))
-        self.group_camera_attention_check = c4
-        ToolTip(c4, "Только для групп. Сначала обычный алгоритм выбирает несколько сильнейших дублей, затем только они перечитываются крупнее. Оценивается поворот головы и положение тёмного центра радужки/зрачка. Сомнительные маленькие глаза считаются unknown и не штрафуются. По умолчанию выключено.")
+        c2.grid(row=3, column=0, columnspan=7, sticky="w", pady=(4, 0))
+        self.group_camera_attention_check = c2
+        ToolTip(c2, "Только для групп. После проверки пригодности программа защищает кадры без явно отведённых взглядов, затем сравнивает их по FBP. Если в первой порции нет надёжного варианта, проверка автоматически расширяется. При отключении используется обычный выбор без критерия взгляда.")
         row += 1
 
         series_method_row = row
@@ -571,7 +415,7 @@ class MainWindow(tk.Tk):
             "Портреты — метод разделения серий:",
             self.series_algorithm_var,
             ("dbscan", "sequential"),
-            "dbscan — сопоставляет лица во всём временном блоке и затем разделяет его на последовательные серии. Обычно это наиболее устойчивый вариант. sequential — сравнивает соседние кадры по порядку съёмки и подтверждает смену человека несколькими кадрами. Профиль параметров серии настраивается отдельно.",
+            "dbscan — сопоставляет лица во всём временном блоке и затем разделяет его на последовательные серии. Обычно это наиболее устойчивый вариант. sequential — сравнивает соседние кадры по порядку съёмки и подтверждает смену человека несколькими кадрами.",
         )
 
         series_profile_row = row
@@ -581,34 +425,14 @@ class MainWindow(tk.Tk):
             "Портреты — профиль параметров серий:",
             self.series_profile_var,
             tuple(SERIES_PROFILES) + (SERIES_CUSTOM,),
-            "Рекомендуется: «Сбалансированный». «Меньше повторов» чаще склеивает соседние фрагменты одного ребёнка. «Строже к случайным кадрам» сильнее отбрасывает стены/пол/отражения. «Чувствительнее к сложным лицам» полезен для дальних, профильных и частично закрытых лиц.",
+            "Рекомендуется: «Сбалансированный». «Меньше повторов» чаще склеивает соседние фрагменты одного ребёнка. «Строже к случайным кадрам» сильнее отбрасывает случайные лица. «Чувствительнее к сложным лицам» полезен для дальних, профильных и частично закрытых лиц.",
             command=self._on_series_profile_selected,
         )
         ttk.Label(tab, textvariable=self.series_profile_desc_var, wraplength=720).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 8))
         series_desc_row = row
         row += 1
 
-        selection_profile_row = row
-        row = self._combo_row(
-            tab,
-            row,
-            "Портреты — профиль выбора кадра:",
-            self.selection_profile_var,
-            tuple(SELECTION_PROFILES) + (SELECTION_CUSTOM,),
-            "Рекомендуется: «Сбалансированный». Профиль меняет только веса выбора лучшего кадра внутри уже найденной серии и не влияет на распознавание ребёнка.",
-            command=self._on_selection_profile_selected,
-        )
-        ttk.Label(tab, textvariable=self.selection_profile_desc_var, wraplength=720).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 6))
-        selection_desc_row = row
-        row += 1
-        boundary_guard_row = row
-        row = self._check_row(
-            tab, row,
-            "Портреты — проверять возможные пропущенные границы вторым методом:",
-            self.portrait_boundary_guard_var,
-            "Экспериментальная быстрая страховка от редкого слияния двух соседних детей. После выбранного метода второй метод только предлагает подозрительную границу, а программа проверяет её по уже рассчитанным ArcFace embeddings. Повторного анализа фотографий нет."
-        )
-        self._portrait_only_basic_rows = [repeat_mode_row, repeat_clear_row, series_method_row, series_profile_row, series_desc_row, selection_profile_row, selection_desc_row, boundary_guard_row]
+        self._portrait_only_basic_rows = [repeat_mode_row, series_method_row, series_profile_row, series_desc_row]
         self._portrait_only_widgets = [
             widget for r in self._portrait_only_basic_rows for widget in tab.grid_slaves(row=r)
         ]
@@ -640,14 +464,6 @@ class MainWindow(tk.Tk):
             "Используется для групп и для портретного режима разных поз. При схеме custom введите точное название жёлтой метки.",
         )
         self._custom_yellow_widgets.extend(self._grid_row_widgets(tab, custom_yellow_row))
-        row = self._check_row(
-            tab,
-            row,
-            "Удалить все старые RED при финальной записи:",
-            self.clear_red_var,
-            "Рекомендуется для повторных прогонов. После полного анализа программа сначала удаляет настроенную RED со всех найденных файлов, включая кадры, которые будут снова выбраны RED/YELLOW, независимо от того, кто поставил метку. Затем записывает новый план. При отмене до commit XMP не изменяется. Остальные XMP/Camera Raw данные сохраняются.",
-        )
-
         ttk.Separator(tab).grid(row=row, column=0, columnspan=3, sticky="ew", pady=8); row += 1
         advanced_check = ttk.Checkbutton(
             tab,
@@ -666,35 +482,25 @@ class MainWindow(tk.Tk):
         row = 0
         ttk.Label(
             tab,
-            text="Только режим «Портреты». Эти параметры определяют, какой кадр победит внутри уже найденной портретной серии. Вес 0 полностью отключает соответствующий критерий.",
+            text=(
+                "Только режим «Портреты». Сначала отбраковываются закрытые глаза, нерезкость и плохое "
+                "техническое качество; поворот головы разрешён. Только после этого пригодные кадры "
+                "сравниваются по Facial Beauty Prediction. Старые веса глаз/резкости/улыбки больше не "
+                "являются пользовательскими настройками и используются лишь как фиксированный fallback, "
+                "когда FBP недостаточно надёжен."
+            ),
             wraplength=790,
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10)); row += 1
-
-        row = self._section(tab, row, "Глаза")
-        row = self._spin_row(tab, row, "Порог открытых глаз:", self.eye_threshold_var, 0.20, 0.85, 0.01,
-            "Рекомендуется: 0.45–0.60; по умолчанию 0.52. Больше → строже к прищуру и полузакрытым глазам. Меньше → мягче.")
-        row = self._check_row(tab, row, "Открытые глаза — обязательный фильтр:", self.prefer_open_eyes_var,
-            "Рекомендуется: включено. Если в серии есть кадр с надёжно открытыми обоими глазами, закрытые глаза не смогут выиграть только за счёт резкости или улыбки.")
-        row = self._spin_row(tab, row, "Вес открытых глаз:", self.eyes_weight_var, 0.0, 3.0, 0.05,
-            "Рекомендуется: 1.5–2.2; по умолчанию 1.8. Больше → сильнее приоритет хорошо открытых глаз. 0 → этот вклад отключён.")
-        row = self._spin_row(tab, row, "Штраф закрытых глаз:", self.closed_eye_penalty_var, 0.0, 1.5, 0.05,
-            "Рекомендуется: 0.35–0.70; по умолчанию 0.45. Больше → сильнее понижается рейтинг кадра с закрытым глазом.")
-
-        row = self._section(tab, row, "Резкость")
-        row = self._spin_row(tab, row, "Вес резкости глаз:", self.eye_sharpness_weight_var, 0.0, 3.0, 0.05,
-            "Рекомендуется: 1.1–1.8; по умолчанию 1.4. Больше → важнее попадание фокуса именно в глаза. 0 → критерий отключён.")
-        row = self._spin_row(tab, row, "Вес резкости лица:", self.face_sharpness_weight_var, 0.0, 3.0, 0.05,
-            "Рекомендуется: 0.7–1.2; по умолчанию 0.9. Отвечает за общую детализацию лица независимо от локальной резкости глаз.")
-
-        row = self._section(tab, row, "Выражение")
-        row = self._spin_row(tab, row, "Вес выражения лица:", self.expression_weight_var, 0.0, 3.0, 0.05,
-            "Рекомендуется: 0.4–1.0; по умолчанию 0.7. Если геометрическая оценка выражения плохо подходит вашей манере съёмки, уменьшите или поставьте 0.")
-        row = self._spin_row(tab, row, "Вес улыбки:", self.smile_weight_var, 0.0, 3.0, 0.05,
-            "Рекомендуется: 0.2–0.6; по умолчанию 0.35. 0 → улыбка вообще не влияет. Больше → программа чаще предпочитает выраженную улыбку.")
-        row = self._spin_row(tab, row, "Вес технического качества:", self.technical_weight_var, 0.0, 3.0, 0.05,
-            "Рекомендуется: 0.2–0.7; по умолчанию 0.35. Слишком высокий вес может предпочесть технически чистый, но менее удачный портрет.")
-
-        ttk.Button(tab, text="Сбалансировать критерии", command=lambda: self._apply_selection_profile("Сбалансированный")).grid(row=row, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        row = self._section(tab, row, "Пригодность")
+        row = self._spin_row(
+            tab, row, "Порог открытых глаз:", self.eye_threshold_var, 0.20, 0.85, 0.01,
+            "Рекомендуется: 0.45–0.60; по умолчанию 0.52. Больше → строже к прищуру и полузакрытым глазам. Этот порог применяется до FBP."
+        )
+        ttk.Label(
+            tab,
+            text="Минимальная резкость глаз/лица и техническое качество задаются проверенными внутренними порогами и всегда проверяются до оценки привлекательности.",
+            wraplength=790,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
     def _build_advanced_tab(self):
         outer = self.advanced_tab
@@ -795,8 +601,11 @@ class MainWindow(tk.Tk):
         ttk.Label(tab, text="Только режим «Портреты». Серые параметры сейчас не участвуют в выбранном методе. Это позволяет видеть все настройки, но сразу понимать, какие реально работают.", wraplength=790).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10)); row += 1
 
         row = self._section(tab, row, "Метод разделения")
-        row = self._combo_row(tab, row, "Портреты — алгоритм разделения:", self.series_algorithm_var, ("dbscan", "sequential"),
-            "Оба метода поддерживаются. dbscan — глобальная кластеризация embeddings; sequential — подтверждённая смена ребёнка по соседним кадрам.")
+        ttk.Label(
+            tab,
+            text="Метод DBSCAN/sequential выбирается на основном экране; здесь настраиваются только параметры выбранного метода.",
+            wraplength=790,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 6)); row += 1
 
         r = row
         row = self._spin_row(tab, row, "Sequential — порог сходства личности:", self.sequential_similarity_var, 0.20, 0.80, 0.01,
@@ -834,10 +643,11 @@ class MainWindow(tk.Tk):
             self._portrait_boundary_guard_option_widgets.extend(self._grid_row_widgets(tab, r))
 
         row = self._section(tab, row, "Повторные позы одного ребёнка")
-        row = self._combo_row(
-            tab, row, "Портреты — режим выбора:", self.repeat_pose_mode_var, tuple(PORTRAIT_REPEAT_MODES),
-            "Тот же переключатель, что на первом экране. После обычного разделения близкие серии одного ребёнка связываются по identity. RED выбирается как лучший кадр вообще среди всех его серий. YELLOW получают только явно отличающиеся позы; небольшие движения не считаются новой позой."
-        )
+        ttk.Label(
+            tab,
+            text="Режим «Один ребёнок / разные позы» включается на основном экране. Ниже — только его дополнительные пороги.",
+            wraplength=790,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 6)); row += 1
         for label, var, lo, hi, inc, help_text in [
             ("Повторные позы — искать среди ближайших серий:", self.repeat_pose_max_series_gap_var, 1, 10, 1, "По умолчанию 3. Поиск локальный: 3 означает текущая серия может совпасть с тем же ребёнком максимум через две промежуточные серии."),
             ("Повторные позы — макс. пауза, сек:", self.repeat_pose_max_seconds_var, 0.0, 900.0, 10.0, "По умолчанию 180 секунд. 0 отключает ограничение по времени, но это менее безопасно."),
@@ -890,38 +700,27 @@ class MainWindow(tk.Tk):
     def _build_group_advanced(self, tab):
         tab.columnconfigure(1, weight=1)
         row = 0
-        ttk.Label(tab, text="Только режим «Группы». Основной проход всегда активен. Параметры high-res становятся доступными только после включения дополнительного прохода.", wraplength=790).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10)); row += 1
+        ttk.Label(tab, text="Только режим «Группы». Здесь настраиваются основной детектор и финальная проверка взгляда в повышенном разрешении.", wraplength=790).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 10)); row += 1
         row = self._section(tab, row, "Основной проход")
         row = self._spin_row(tab, row, "Группы — preview, длинная сторона:", self.group_preview_var, 1600, 6000, 128,
-            "По умолчанию 3200. Больше → лучше маленькие лица, но медленнее декодирование.")
+            "По умолчанию 3200. Больше → лучше распознаются дальние лица, но медленнее декодирование.")
         row = self._spin_row(tab, row, "Группы — размер детектора, px:", self.group_det_size_var, 512, 2048, 32,
             "По умолчанию 1024. Это основной быстрый проход, который формирует stable roster.")
         row = self._spin_row(tab, row, "Группы — порог детектора:", self.group_det_thresh_var, 0.08, 0.60, 0.01,
             "По умолчанию 0.22. Меньше → чувствительнее, но больше ложных лиц.")
         row = self._spin_row(tab, row, "Группы — мин. площадь лица, %:", self.group_min_face_pct_var, 0.005, 1.0, 0.005,
-            "По умолчанию 0.035%. Отсекает очень маленькие/фоновые детекции при формировании stable roster.")
-        row = self._section(tab, row, "Дополнительный high-res проход")
-        row = self._check_row(tab, row, "Включить улучшенный поиск маленьких лиц:", self.group_highres_rescue_var,
-            "По умолчанию выключено. Повышает полноту распознавания групп, но заметно увеличивает время работы.")
-        for label, var, lo, hi, inc, help_text in [
-            ("High-res — размер детектора, px:", self.group_highres_det_size_var, 1024, 2048, 32, "По умолчанию 1536. Больше → медленнее и выше расход VRAM."),
-            ("High-res — порог детектора:", self.group_highres_det_thresh_var, 0.05, 0.40, 0.01, "По умолчанию 0.14. Дополнительное лицо всё равно должно подтвердиться на нескольких дублях."),
-            ("High-res — мин. площадь лица, %:", self.group_highres_min_face_pct_var, 0.003, 0.50, 0.001, "По умолчанию 0.018%. Меньше разрешает искать более маленькие лица."),
-            ("High-res — минимум дублей с лицом:", self.group_highres_min_presence_var, 2, 8, 1, "По умолчанию 2. Новое лицо не добавляется в состав по одиночной детекции."),
-        ]:
-            r = row
-            row = self._spin_row(tab, row, label, var, lo, hi, inc, help_text)
-            self._highres_option_widgets.extend(self._grid_row_widgets(tab, r))
-
+            "По умолчанию 0.035%. Отсекает слишком слабые/фоновые детекции при формировании stable roster.")
         row = self._section(tab, row, "Взгляд в камеру — финальная проверка")
-        row = self._check_row(tab, row, "Учитывать взгляд в камеру:", self.group_camera_attention_var,
-            "Экспериментально. Не меняет разделение групп и основной рейтинг всех кадров. После обычного отбора перечитывает крупнее только несколько лучших дублей и уточняет RED по направлению головы/глаз.")
+        ttk.Label(
+            tab,
+            text="Проверка взгляда включается на основном экране. Здесь задаются только параметры финального прохода по короткому списку лучших дублей.",
+            wraplength=790,
+        ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 6)); row += 1
         for label, var, lo, hi, inc, help_text in [
-            ("Взгляд — сколько лучших дублей проверять:", self.group_camera_attention_shortlist_var, 2, 6, 1, "По умолчанию 3. Больше → выше шанс найти удачный взгляд, но почти линейно растёт время финальной проверки."),
+            ("Взгляд — сколько лучших дублей проверять:", self.group_camera_attention_shortlist_var, 2, 8, 1, "По умолчанию 5. Больше → выше шанс найти удачный взгляд, но почти линейно растёт время финальной проверки."),
             ("Взгляд — preview, длинная сторона:", self.group_camera_attention_preview_var, 2400, 7000, 128, "По умолчанию 4800. Это применяется только к короткому списку лучших кадров, а не ко всей съёмке."),
-            ("Взгляд — размер детектора, px:", self.group_camera_attention_det_size_var, 640, 2048, 32, "По умолчанию 1280. Кратно 32. Если включён общий high-res поиск лиц, используется уже загруженный его InsightFace-анализатор."),
+            ("Взгляд — размер детектора, px:", self.group_camera_attention_det_size_var, 640, 2048, 32, "По умолчанию 1280. Кратно 32. Этот детектор используется только для короткого списка финальной проверки взгляда."),
             ("Взгляд — мин. ширина глаза, px:", self.group_camera_attention_min_eye_px_var, 8.0, 40.0, 1.0, "По умолчанию 14 px. Меньше → больше детей получают оценку взгляда, но растёт риск ошибки. Если глаз меньше порога, состояние считается unknown."),
-            ("Взгляд — штраф за явно отведённый взгляд:", self.group_camera_attention_away_penalty_var, 0.0, 1.2, 0.05, "По умолчанию 0.45. Это мягкий штраф на долю людей, уверенно смотрящих в сторону; моргание по-прежнему важнее."),
         ]:
             r = row
             row = self._spin_row(tab, row, label, var, lo, hi, inc, help_text)
@@ -948,7 +747,7 @@ class MainWindow(tk.Tk):
         row = self._section(tab, row, "Защита видеопамяти")
         row = self._check_row(
             tab, row, "Безопасное управление VRAM:", self.gpu_memory_safe_mode_var,
-            "Рекомендуется: включено. Ограничивает рост CUDA memory arena, задаёт лимит на одну ORT-сессию, а для тяжёлых Group high-res/взгляд использует отдельный лимит числа GPU-сессий."
+            "Рекомендуется: включено. Ограничивает рост CUDA memory arena, задаёт лимит на одну ORT-сессию, а для финальной Group-проверки взгляда использует отдельный лимит числа GPU-сессий."
         )
         r = row
         row = self._spin_row(
@@ -958,7 +757,7 @@ class MainWindow(tk.Tk):
         self._gpu_memory_safe_option_widgets.extend(self._grid_row_widgets(tab, r))
         r = row
         row = self._spin_row(
-            tab, row, "Макс. GPU-сессий для Group high-res/взгляда:", self.group_secondary_face_workers_var, 1, 4, 1,
+            tab, row, "Макс. GPU-сессий для Group-проверки взгляда:", self.group_secondary_face_workers_var, 1, 4, 1,
             "Рекомендуется: 2. Основной проход по сотням файлов по-прежнему может использовать выбранные выше 4 сессии. Но финальный взгляд обычно проверяет только 3 кадра группы, поэтому 4 постоянно загруженные модели расходуют VRAM почти без пользы."
         )
         secondary_widgets = self._grid_row_widgets(tab, r)
@@ -972,7 +771,7 @@ class MainWindow(tk.Tk):
         self._gpu_memory_safe_option_widgets.extend(self._grid_row_widgets(tab, r))
         ttk.Label(
             tab,
-            text="При выбранных 4 параллельных сессиях safe mode не отнимает ускорение у основного прохода: ограничение до 1–2 сессий применяется только к повторным Group high-res/взгляд этапам.",
+            text="При выбранных 4 параллельных сессиях safe mode не отнимает ускорение у основного прохода: ограничение до 1–2 сессий применяется только к финальному Group gaze-этапу.",
             wraplength=790,
         ).grid(row=row, column=0, columnspan=3, sticky="w", pady=(6, 10)); row += 1
 
@@ -1084,22 +883,15 @@ class MainWindow(tk.Tk):
             except tk.TclError:
                 pass
 
-        repeat_enabled = portrait and self._repeat_pose_mode_code() in {"red_yellow", "first_red_rest_yellow", "best_red_pose_yellow"}
+        repeat_enabled = portrait and self._repeat_pose_mode_code() == "best_red_pose_yellow"
         self._set_widgets_enabled(self._dbscan_only_widgets, portrait and algorithm == "dbscan")
         self._set_widgets_enabled(self._sequential_only_widgets, portrait and algorithm == "sequential")
         self._set_widgets_enabled(self._portrait_boundary_guard_option_widgets, portrait and bool(self.portrait_boundary_guard_var.get()))
         self._set_widgets_enabled(self._portrait_repeat_option_widgets, repeat_enabled)
         self._set_widgets_enabled(self._portrait_repeat_basic_option_widgets, repeat_enabled)
-        self._set_widgets_enabled(self._highres_option_widgets, group and bool(self.group_highres_rescue_var.get()))
         camera_enabled = group and bool(self.group_camera_attention_var.get())
         self._set_widgets_enabled(self._camera_attention_option_widgets, camera_enabled)
-        # With face-rescue enabled the gaze shortlist reuses that already-loaded
-        # InsightFace session, so its detector size comes from the high-res block.
-        # Make the otherwise ignored gaze detector field visibly inactive.
-        self._set_widgets_enabled(
-            self._camera_attention_detector_widgets,
-            camera_enabled and not bool(self.group_highres_rescue_var.get()),
-        )
+        self._set_widgets_enabled(self._camera_attention_detector_widgets, camera_enabled)
         self._set_widgets_enabled(self._yellow_option_widgets, group and bool(self.group_find_candidates_var.get()))
         self._set_widgets_enabled(self._custom_red_widgets, self.scheme_var.get().strip().lower() == "custom")
         self._set_widgets_enabled(
@@ -1111,8 +903,6 @@ class MainWindow(tk.Tk):
         safe_vram = bool(self.gpu_memory_safe_mode_var.get())
         self._set_widgets_enabled(self._gpu_memory_safe_option_widgets, safe_vram)
         self._set_widgets_enabled(self._gpu_secondary_worker_widgets, safe_vram and parallel_enabled)
-        if hasattr(self, "clear_yellow_check"):
-            self._set_widgets_enabled([self.clear_yellow_check], group)
 
     def _apply_mode_ui(self):
         mode = self.mode_var.get()
@@ -1157,14 +947,6 @@ class MainWindow(tk.Tk):
         self._apply_context_states()
 
     def _install_profile_traces(self):
-        selection_vars = (
-            self.eye_threshold_var, self.prefer_open_eyes_var, self.eyes_weight_var,
-            self.closed_eye_penalty_var, self.eye_sharpness_weight_var,
-            self.face_sharpness_weight_var, self.expression_weight_var,
-            self.smile_weight_var, self.technical_weight_var,
-        )
-        for var in selection_vars:
-            var.trace_add("write", lambda *_: self._selection_changed())
         series_vars = (
             self.series_algorithm_var, self.sequential_similarity_var, self.sequential_confirm_frames_var,
             self.dbscan_distance_var, self.dbscan_min_samples_var,
@@ -1176,15 +958,6 @@ class MainWindow(tk.Tk):
         for var in series_vars:
             var.trace_add("write", lambda *_: self._series_changed())
 
-    def _selection_changed(self):
-        if self._applying_profile:
-            return
-        try:
-            self.selection_profile_var.set(self._infer_selection_profile())
-        except (tk.TclError, ValueError, TypeError):
-            self.selection_profile_var.set(SELECTION_CUSTOM)
-        self._update_profile_descriptions()
-
     def _series_changed(self):
         if self._applying_profile:
             return
@@ -1193,23 +966,6 @@ class MainWindow(tk.Tk):
         except (tk.TclError, ValueError, TypeError):
             self.series_profile_var.set(SERIES_CUSTOM)
         self._update_profile_descriptions()
-
-    def _infer_selection_profile(self) -> str:
-        current = {
-            "eye_threshold": float(self.eye_threshold_var.get()),
-            "prefer_open_eyes": bool(self.prefer_open_eyes_var.get()),
-            "eyes_weight": float(self.eyes_weight_var.get()),
-            "closed_eye_penalty": float(self.closed_eye_penalty_var.get()),
-            "eye_sharpness_weight": float(self.eye_sharpness_weight_var.get()),
-            "face_sharpness_weight": float(self.face_sharpness_weight_var.get()),
-            "expression_weight": float(self.expression_weight_var.get()),
-            "smile_weight": float(self.smile_weight_var.get()),
-            "technical_weight": float(self.technical_weight_var.get()),
-        }
-        for name, profile in SELECTION_PROFILES.items():
-            if _mapping_close(current, profile):
-                return name
-        return SELECTION_CUSTOM
 
     def _infer_series_profile(self) -> str:
         current = {
@@ -1230,39 +986,14 @@ class MainWindow(tk.Tk):
             "face_min_pct": float(self.face_min_pct_var.get()),
         }
         for name, profile in SERIES_PROFILES.items():
-            comparable = {k: v for k, v in profile.items() if k != "series_algorithm"}
-            if _mapping_close(current, comparable):
+            if _mapping_close(current, profile):
                 return name
         return SERIES_CUSTOM
-
-    def _on_selection_profile_selected(self):
-        name = self.selection_profile_var.get()
-        if name != SELECTION_CUSTOM:
-            self._apply_selection_profile(name)
-        self._update_profile_descriptions()
 
     def _on_series_profile_selected(self):
         name = self.series_profile_var.get()
         if name != SERIES_CUSTOM:
             self._apply_series_profile(name)
-        self._update_profile_descriptions()
-
-    def _apply_selection_profile(self, name: str):
-        profile = SELECTION_PROFILES[name]
-        self._applying_profile = True
-        try:
-            self.eye_threshold_var.set(profile["eye_threshold"])
-            self.prefer_open_eyes_var.set(profile["prefer_open_eyes"])
-            self.eyes_weight_var.set(profile["eyes_weight"])
-            self.closed_eye_penalty_var.set(profile["closed_eye_penalty"])
-            self.eye_sharpness_weight_var.set(profile["eye_sharpness_weight"])
-            self.face_sharpness_weight_var.set(profile["face_sharpness_weight"])
-            self.expression_weight_var.set(profile["expression_weight"])
-            self.smile_weight_var.set(profile["smile_weight"])
-            self.technical_weight_var.set(profile["technical_weight"])
-            self.selection_profile_var.set(name)
-        finally:
-            self._applying_profile = False
         self._update_profile_descriptions()
 
     def _apply_series_profile(self, name: str):
@@ -1290,13 +1021,6 @@ class MainWindow(tk.Tk):
         self._update_profile_descriptions()
 
     def _update_profile_descriptions(self):
-        selection_text = {
-            "Сбалансированный": "Универсальный выбор: открытые глаза и резкость важнее, но выражение и улыбка тоже учитываются.",
-            "Глаза и фокус": "Более строгий выбор по открытым глазам и точности фокуса; улыбка влияет меньше.",
-            "Выражение и улыбка": "Выражение лица и улыбка влияют заметнее, но открытые глаза всё ещё защищены обязательным фильтром.",
-            "Без приоритета улыбки": "Улыбка не влияет на рейтинг; подходят спокойные портреты и нейтральные выражения.",
-            SELECTION_CUSTOM: "Пользовательские значения. Точные параметры доступны на вкладке «Критерии выбора».",
-        }
         series_text = {
             "Сбалансированный": "Рекомендуемые базовые параметры для обычных серий 3–20 кадров. Метод DBSCAN/sequential выбирается отдельно.",
             "Меньше повторов": "Чуть активнее объединяет соседние фрагменты/серии одного ребёнка. DBSCAN-специфичные части профиля при sequential автоматически не участвуют.",
@@ -1304,25 +1028,7 @@ class MainWindow(tk.Tk):
             "Чувствительнее к сложным лицам": "Снижает пороги детектора и увеличивает detector input; эти общие параметры полезны и DBSCAN, и sequential.",
             SERIES_CUSTOM: "Изменены базовые параметры серии. Метод DBSCAN/sequential является отдельной настройкой и не определяет имя профиля.",
         }
-        group_text = {
-            "Глаза прежде всего": "Рекомендуется для групп: сначала максимум детей с открытыми глазами, затем остальные критерии; минимум 1 резервный YELLOW.",
-            "Сбалансированный": "Глаза всё ещё важнее, чем в портретах, но общий score влияет немного сильнее.",
-            "Больше резервных кадров": "Мягче к альтернативным дублям и старается дать минимум 2 YELLOW для ручного выбора/перестановки голов.",
-        }
-        self.selection_profile_desc_var.set(selection_text.get(self.selection_profile_var.get(), ""))
         self.series_profile_desc_var.set(series_text.get(self.series_profile_var.get(), ""))
-        self.group_profile_desc_var.set(group_text.get(self.group_profile_var.get(), ""))
-
-    def _on_group_profile_selected(self):
-        name = self.group_profile_var.get()
-        profile = GROUP_RULE_PROFILES.get(name)
-        if not profile:
-            return
-        self.group_min_extra_var.set(int(profile.get("min_extra_candidates", 1)))
-        self.group_max_extra_var.set(int(profile.get("max_extra_candidates", 3)))
-        self.group_find_candidates_var.set(True)
-        self._update_profile_descriptions()
-        self._apply_context_states()
 
     def _browse(self):
         folder = filedialog.askdirectory(initialdir=self.folder_var.get() or None)
@@ -1382,25 +1088,19 @@ class MainWindow(tk.Tk):
                 self.repeat_pose_distance_var, self.repeat_pose_pair_similarity_var, self.repeat_pose_vote_fraction_var,
                 self.repeat_pose_cohesion_var, self.repeat_pose_margin_var, self.repeat_pose_max_yellows_var, self.repeat_pose_min_pose_frames_var,
                 self.repeat_pose_min_head_conf_var, self.repeat_pose_yaw_delta_var, self.repeat_pose_pitch_delta_var,
-                self.repeat_pose_center_shift_var, self.repeat_pose_scale_change_var, self.eye_threshold_var, self.eyes_weight_var,
-                self.closed_eye_penalty_var, self.eye_sharpness_weight_var, self.face_sharpness_weight_var,
-                self.expression_weight_var, self.smile_weight_var, self.technical_weight_var,
+                self.repeat_pose_center_shift_var, self.repeat_pose_scale_change_var, self.eye_threshold_var,
             ))
-            if not self.group_highres_rescue_var.get():
-                inactive_vars.update(id(v) for v in (self.group_highres_det_size_var, self.group_highres_det_thresh_var, self.group_highres_min_face_pct_var, self.group_highres_min_presence_var))
             if not self.group_camera_attention_var.get():
-                inactive_vars.update(id(v) for v in (self.group_camera_attention_shortlist_var, self.group_camera_attention_preview_var, self.group_camera_attention_det_size_var, self.group_camera_attention_min_eye_px_var, self.group_camera_attention_away_penalty_var))
-            elif self.group_highres_rescue_var.get():
-                inactive_vars.add(id(self.group_camera_attention_det_size_var))
+                inactive_vars.update(id(v) for v in (self.group_camera_attention_shortlist_var, self.group_camera_attention_preview_var, self.group_camera_attention_det_size_var, self.group_camera_attention_min_eye_px_var))
         else:
-            inactive_vars.update(id(v) for v in (self.group_preview_var, self.group_det_size_var, self.group_det_thresh_var, self.group_min_face_pct_var, self.group_highres_det_size_var, self.group_highres_det_thresh_var, self.group_highres_min_face_pct_var, self.group_highres_min_presence_var, self.group_camera_attention_shortlist_var, self.group_camera_attention_preview_var, self.group_camera_attention_det_size_var, self.group_camera_attention_min_eye_px_var, self.group_camera_attention_away_penalty_var))
+            inactive_vars.update(id(v) for v in (self.group_preview_var, self.group_det_size_var, self.group_det_thresh_var, self.group_min_face_pct_var, self.group_camera_attention_shortlist_var, self.group_camera_attention_preview_var, self.group_camera_attention_det_size_var, self.group_camera_attention_min_eye_px_var))
             if self.series_algorithm_var.get().strip().lower() == "dbscan":
                 inactive_vars.update(id(v) for v in (self.sequential_similarity_var, self.sequential_confirm_frames_var))
             else:
                 inactive_vars.update(id(v) for v in (self.dbscan_distance_var, self.dbscan_min_samples_var, self.segment_merge_distance_var, self.min_confirmed_frames_var, self.confirm_det_thresh_var, self.confirm_face_min_pct_var))
             if not self.portrait_boundary_guard_var.get():
                 inactive_vars.update(id(v) for v in (self.portrait_boundary_guard_window_var, self.portrait_boundary_guard_min_evidence_var, self.portrait_boundary_guard_distance_var, self.portrait_boundary_guard_margin_var))
-            if self._repeat_pose_mode_code() not in {"red_yellow", "first_red_rest_yellow", "best_red_pose_yellow"}:
+            if self._repeat_pose_mode_code() != "best_red_pose_yellow":
                 inactive_vars.update(id(v) for v in (
                     self.repeat_pose_max_series_gap_var, self.repeat_pose_max_seconds_var, self.repeat_pose_min_evidence_var,
                     self.repeat_pose_distance_var, self.repeat_pose_pair_similarity_var, self.repeat_pose_vote_fraction_var,
@@ -1430,10 +1130,7 @@ class MainWindow(tk.Tk):
             if int(self.group_det_size_var.get()) % 32 != 0:
                 messagebox.showerror("Некорректная настройка", "Группы: размер основного детектора должен быть кратен 32.")
                 return False
-            if self.group_highres_rescue_var.get() and int(self.group_highres_det_size_var.get()) % 32 != 0:
-                messagebox.showerror("Некорректная настройка", "Группы: high-res размер детектора должен быть кратен 32.")
-                return False
-            if self.group_camera_attention_var.get() and not self.group_highres_rescue_var.get() and int(self.group_camera_attention_det_size_var.get()) % 32 != 0:
+            if self.group_camera_attention_var.get() and int(self.group_camera_attention_det_size_var.get()) % 32 != 0:
                 messagebox.showerror("Некорректная настройка", "Группы: размер детектора проверки взгляда должен быть кратен 32.")
                 return False
         try:
@@ -1448,7 +1145,6 @@ class MainWindow(tk.Tk):
             if self.mode_var.get() == "group" and self.group_find_candidates_var.get() and int(self.group_min_extra_var.get()) > int(self.group_max_extra_var.get()):
                 raise ValueError("extra_order")
         except Exception as exc:
-            labels = {"preview": "Group preview long edge", "min_people": "Мин. детей в группе", "max_extra": "Макс. дополнительных кандидатов"}
             key = str(exc)
             if key == 'preview':
                 msg = 'Group preview long edge должен быть в диапазоне 1600–6000.'
@@ -1464,7 +1160,7 @@ class MainWindow(tk.Tk):
             return False
         yellow_is_used = self.mode_var.get() == "group" or (
             self.mode_var.get() == "portrait"
-            and self._repeat_pose_mode_code() in {"red_yellow", "first_red_rest_yellow", "best_red_pose_yellow"}
+            and self._repeat_pose_mode_code() == "best_red_pose_yellow"
         )
         if yellow_is_used:
             scheme = self.scheme_var.get().strip().lower()
@@ -1480,26 +1176,21 @@ class MainWindow(tk.Tk):
         return True
 
     def _current_config(self) -> dict:
-        group_rules = dict(GROUP_RULE_PROFILES.get(self.group_profile_var.get(), GROUP_RULE_PROFILES[GROUP_PROFILE_DEFAULT]))
-        group_rules.update({
+        # Group suitability thresholds are fixed in config/default.json.  The UI
+        # exposes only operational controls; there are no competing rule profiles.
+        group_rules = {
             "min_people": int(self.group_min_people_var.get()),
             "find_headswap_candidates": bool(self.group_find_candidates_var.get()),
             "max_extra_candidates": int(self.group_max_extra_var.get()),
             "min_extra_candidates": int(self.group_min_extra_var.get()),
             "track_det_thresh": float(self.group_det_thresh_var.get()),
             "min_track_face_fraction": float(self.group_min_face_pct_var.get()) / 100.0,
-            "highres_rescue_enabled": bool(self.group_highres_rescue_var.get()),
-            "highres_rescue_det_size": int(self.group_highres_det_size_var.get()),
-            "highres_rescue_det_thresh": float(self.group_highres_det_thresh_var.get()),
-            "highres_rescue_min_face_fraction": float(self.group_highres_min_face_pct_var.get()) / 100.0,
-            "highres_rescue_min_presence": int(self.group_highres_min_presence_var.get()),
             "camera_attention_enabled": bool(self.group_camera_attention_var.get()),
             "camera_attention_shortlist": int(self.group_camera_attention_shortlist_var.get()),
             "camera_attention_preview_long_edge": int(self.group_camera_attention_preview_var.get()),
             "camera_attention_det_size": int(self.group_camera_attention_det_size_var.get()),
             "camera_attention_min_eye_px": float(self.group_camera_attention_min_eye_px_var.get()),
-            "camera_attention_away_penalty": float(self.group_camera_attention_away_penalty_var.get()),
-        })
+        }
         return merged_config(
             self.base_config,
             {
@@ -1537,14 +1228,6 @@ class MainWindow(tk.Tk):
                     "eye_open_threshold": float(self.eye_threshold_var.get()),
                 },
                 "portrait": {
-                    "prefer_open_eyes": bool(self.prefer_open_eyes_var.get()),
-                    "eyes_weight": float(self.eyes_weight_var.get()),
-                    "closed_eye_penalty": float(self.closed_eye_penalty_var.get()),
-                    "eye_sharpness_weight": float(self.eye_sharpness_weight_var.get()),
-                    "face_sharpness_weight": float(self.face_sharpness_weight_var.get()),
-                    "expression_weight": float(self.expression_weight_var.get()),
-                    "smile_weight": float(self.smile_weight_var.get()),
-                    "technical_weight": float(self.technical_weight_var.get()),
                     "repeat_pose_mode": self._repeat_pose_mode_code(),
                     "repeat_pose_max_series_gap": int(self.repeat_pose_max_series_gap_var.get()),
                     "repeat_pose_max_seconds": float(self.repeat_pose_max_seconds_var.get()),
@@ -1572,8 +1255,6 @@ class MainWindow(tk.Tk):
                     "scheme": self.scheme_var.get(),
                     "custom_red": self.custom_red_var.get().strip() or "Select",
                     "custom_yellow": self.custom_yellow_var.get().strip() or "Second",
-                    "clear_red_before_run": bool(self.clear_red_var.get()),
-                    "clear_yellow_before_run": bool(self.clear_yellow_var.get()),
                 },
                 "runtime": {
                     "mode": self.mode_var.get(),
@@ -1608,9 +1289,7 @@ class MainWindow(tk.Tk):
         mode_name = "групповой" if self.mode_var.get() == "group" else "портретный"
         if self.mode_var.get() == "group":
             profile_text = (
-                f"Профиль групп: {self.group_profile_var.get()}\n"
                 f"YELLOW минимум/максимум: {self.group_min_extra_var.get()}/{self.group_max_extra_var.get()}\n"
-                f"High-res поиск лиц: {'вкл' if self.group_highres_rescue_var.get() else 'выкл'}\n"
                 f"Взгляд в камеру: {'вкл' if self.group_camera_attention_var.get() else 'выкл'}\n"
             )
         else:
@@ -1619,7 +1298,6 @@ class MainWindow(tk.Tk):
                 f"Режим выбора: {self.repeat_pose_mode_var.get()}\n"
                 f"Проверка пропущенных границ: {'вкл' if self.portrait_boundary_guard_var.get() else 'выкл'}\n"
                 f"Профиль параметров серий: {self.series_profile_var.get()}\n"
-                f"Профиль выбора: {self.selection_profile_var.get()}\n"
             )
         self._append(
             f"\n=== Новый {mode_name} анализ ===\n"
@@ -1632,6 +1310,7 @@ class MainWindow(tk.Tk):
             f"Защита VRAM: {'вкл — ' + format(self.gpu_session_mem_limit_gb_var.get(), 'g') + ' ГБ/сессию, secondary ≤' + str(self.group_secondary_face_workers_var.get()) if self.gpu_memory_safe_mode_var.get() else 'выкл'}\n"
         )
         cfg = self._current_config()
+        self._save_current_ui_state()
         self.worker = threading.Thread(target=self._worker, args=(folder, cfg), daemon=True)
         self.worker.start()
 
@@ -1751,47 +1430,6 @@ class MainWindow(tk.Tk):
         if value:
             logging.getLogger("photo_select_ai").info(value)
 
-    def _show_result_dialog(self, stats):
-        dialog = tk.Toplevel(self)
-        dialog.title("Результат анализа — Photo Select AI")
-        dialog.transient(self)
-        dialog.geometry("600x540")
-        dialog.minsize(520, 440)
-        frame = ttk.Frame(dialog, padding=16)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Анализ завершён", font=("TkDefaultFont", 15, "bold")).pack(anchor="w")
-        if getattr(stats, "run_mode", "portrait") == "group":
-            summary_line = f"Выбрано RED групп: {stats.group_main_selected}; YELLOW кандидатов: {stats.group_extra_selected}; групповых серий: {stats.group_series}."
-        else:
-            if stats.portrait_repeat_yellow_selected or stats.portrait_repeat_links:
-                summary_line = (
-                    f"Выбрано RED: {stats.portrait_selected}; YELLOW разных поз: "
-                    f"{stats.portrait_repeat_yellow_selected}; обработано серий: {stats.portrait_series}."
-                )
-            else:
-                summary_line = f"Выбрано {stats.portrait_selected} лучших кадров из {stats.portrait_series} обработанных серий."
-        ttk.Label(
-            frame,
-            text=summary_line,
-            font=("TkDefaultFont", 11),
-        ).pack(anchor="w", pady=(3, 12))
-        text_value = _stats_text(stats).strip()
-        text = tk.Text(frame, wrap="word", height=18)
-        text.pack(fill="both", expand=True)
-        text.insert("1.0", text_value)
-        text.configure(state="disabled")
-        buttons = ttk.Frame(frame)
-        buttons.pack(fill="x", pady=(12, 0))
-        ttk.Button(buttons, text="Скопировать статистику", command=lambda: self._copy_to_clipboard(text_value)).pack(side="left")
-        ttk.Button(buttons, text="Закрыть", command=dialog.destroy).pack(side="right")
-        dialog.lift(); dialog.focus_force()
-
-    def _copy_to_clipboard(self, text: str):
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.update_idletasks()
-        self.status_var.set("Статистика скопирована в буфер обмена")
-
     def _reset_defaults(self):
         c = self.base_config; p = c["portrait"]
         self._applying_profile = True
@@ -1816,28 +1454,18 @@ class MainWindow(tk.Tk):
             self.group_preview_var.set(int(c["preview"].get("group_long_edge", 3200)))
             self.custom_yellow_var.set(str(c["xmp"].get("custom_yellow", "Second")))
             self.group_min_people_var.set(int(c.get("group", {}).get("min_people", 4)))
-            self.group_highres_rescue_var.set(bool(c.get("group", {}).get("highres_rescue_enabled", False)))
             self.group_det_size_var.set(int(c.get("analysis", {}).get("insightface_det_size_group", 1024)))
             self.group_det_thresh_var.set(float(c.get("analysis", {}).get("insightface_det_thresh_group", 0.22)))
             self.group_min_face_pct_var.set(float(c.get("group", {}).get("min_track_face_fraction", 0.00035)) * 100.0)
-            self.group_highres_det_size_var.set(int(c.get("group", {}).get("highres_rescue_det_size", 1536)))
-            self.group_highres_det_thresh_var.set(float(c.get("group", {}).get("highres_rescue_det_thresh", 0.14)))
-            self.group_highres_min_face_pct_var.set(float(c.get("group", {}).get("highres_rescue_min_face_fraction", 0.00018)) * 100.0)
-            self.group_highres_min_presence_var.set(int(c.get("group", {}).get("highres_rescue_min_presence", 2)))
             self.group_camera_attention_var.set(bool(c.get("group", {}).get("camera_attention_enabled", False)))
-            self.group_camera_attention_shortlist_var.set(int(c.get("group", {}).get("camera_attention_shortlist", 3)))
+            self.group_camera_attention_shortlist_var.set(int(c.get("group", {}).get("camera_attention_shortlist", 5)))
             self.group_camera_attention_preview_var.set(int(c.get("group", {}).get("camera_attention_preview_long_edge", 4800)))
             self.group_camera_attention_det_size_var.set(int(c.get("group", {}).get("camera_attention_det_size", 1280)))
             self.group_camera_attention_min_eye_px_var.set(float(c.get("group", {}).get("camera_attention_min_eye_px", 14.0)))
-            self.group_camera_attention_away_penalty_var.set(float(c.get("group", {}).get("camera_attention_away_penalty", 0.45)))
-            self.group_profile_var.set(GROUP_PROFILE_DEFAULT)
-            self.group_min_extra_var.set(int(GROUP_RULE_PROFILES[GROUP_PROFILE_DEFAULT].get("min_extra_candidates", 1)))
-            self.group_max_extra_var.set(int(GROUP_RULE_PROFILES[GROUP_PROFILE_DEFAULT].get("max_extra_candidates", 3)))
+            self.group_min_extra_var.set(int(c.get("group", {}).get("min_extra_candidates", 1)))
+            self.group_max_extra_var.set(int(c.get("group", {}).get("max_extra_candidates", 3)))
             self.group_find_candidates_var.set(bool(c.get("group", {}).get("find_headswap_candidates", True)))
-            self.clear_red_var.set(bool(c["xmp"].get("clear_red_before_run", True)))
-            self.clear_yellow_var.set(bool(c["xmp"].get("clear_yellow_before_run", True)))
-            self.eye_threshold_var.set(float(c["analysis"]["eye_open_threshold"])); self.prefer_open_eyes_var.set(bool(p.get("prefer_open_eyes", True))); self.eyes_weight_var.set(float(p.get("eyes_weight", 1.8))); self.closed_eye_penalty_var.set(float(p.get("closed_eye_penalty", 0.45))); self.eye_sharpness_weight_var.set(float(p.get("eye_sharpness_weight", 1.4))); self.face_sharpness_weight_var.set(float(p.get("face_sharpness_weight", 0.9))); self.expression_weight_var.set(float(p.get("expression_weight", 0.7))); self.smile_weight_var.set(float(p.get("smile_weight", 0.35))); self.technical_weight_var.set(float(p.get("technical_weight", 0.35)))
-            self.selection_profile_var.set("Сбалансированный")
+            self.eye_threshold_var.set(float(c["analysis"]["eye_open_threshold"]))
             self.series_profile_var.set("Сбалансированный")
         finally:
             self._applying_profile = False
@@ -1849,17 +1477,24 @@ class MainWindow(tk.Tk):
         providers = ", ".join(hw.onnx_providers) if hw.onnx_providers else "ORT unavailable"
         self.events.put(("hardware", f"{hw.summary} | ONNX: {providers}"))
 
-    def _on_close(self):
+    def _save_current_ui_state(self):
         save_ui_state({
-            "state_version": 14,
-            "folder": self.folder_var.get(), "mode": self.mode_var.get(), "preview": self.preview_var.get(), "group_preview": self.group_preview_var.get(), "scheme": self.scheme_var.get(), "custom_red": self.custom_red_var.get(), "custom_yellow": self.custom_yellow_var.get(), "clear_red_before_run": self.clear_red_var.get(), "clear_yellow_before_run": self.clear_yellow_var.get(), "group_profile": self.group_profile_var.get(), "group_min_people": self.group_min_people_var.get(), "group_min_extra": self.group_min_extra_var.get(), "group_max_extra": self.group_max_extra_var.get(), "group_find_candidates": self.group_find_candidates_var.get(), "group_highres_rescue": self.group_highres_rescue_var.get(), "group_det_size": self.group_det_size_var.get(), "group_det_thresh": self.group_det_thresh_var.get(), "group_min_face_pct": self.group_min_face_pct_var.get(), "group_highres_det_size": self.group_highres_det_size_var.get(), "group_highres_det_thresh": self.group_highres_det_thresh_var.get(), "group_highres_min_face_pct": self.group_highres_min_face_pct_var.get(), "group_highres_min_presence": self.group_highres_min_presence_var.get(), "group_camera_attention": self.group_camera_attention_var.get(), "group_camera_attention_shortlist": self.group_camera_attention_shortlist_var.get(), "group_camera_attention_preview": self.group_camera_attention_preview_var.get(), "group_camera_attention_det_size": self.group_camera_attention_det_size_var.get(), "group_camera_attention_min_eye_px": self.group_camera_attention_min_eye_px_var.get(), "group_camera_attention_away_penalty": self.group_camera_attention_away_penalty_var.get(),
+            "state_version": UI_STATE_VERSION,
+            "folder": self.folder_var.get(), "mode": self.mode_var.get(), "preview": self.preview_var.get(), "group_preview": self.group_preview_var.get(), "scheme": self.scheme_var.get(), "custom_red": self.custom_red_var.get(), "custom_yellow": self.custom_yellow_var.get(), "group_min_people": self.group_min_people_var.get(), "group_min_extra": self.group_min_extra_var.get(), "group_max_extra": self.group_max_extra_var.get(), "group_find_candidates": self.group_find_candidates_var.get(), "group_det_size": self.group_det_size_var.get(), "group_det_thresh": self.group_det_thresh_var.get(), "group_min_face_pct": self.group_min_face_pct_var.get(), "group_camera_attention": self.group_camera_attention_var.get(), "group_camera_attention_shortlist": self.group_camera_attention_shortlist_var.get(), "group_camera_attention_preview": self.group_camera_attention_preview_var.get(), "group_camera_attention_det_size": self.group_camera_attention_det_size_var.get(), "group_camera_attention_min_eye_px": self.group_camera_attention_min_eye_px_var.get(),
             "advanced_visible": bool(self.advanced_var.get()),
             "insightface_provider": self.provider_var.get(), "cuda_conv_algo": self.cuda_algo_var.get(), "cuda_fallback": self.cuda_fallback_var.get(), "cpu_workers": self.cpu_workers_var.get(), "parallel_face_analysis": self.parallel_face_analysis_var.get(), "parallel_face_workers": self.parallel_face_workers_var.get(), "gpu_memory_safe_mode": self.gpu_memory_safe_mode_var.get(), "gpu_session_mem_limit_gb": self.gpu_session_mem_limit_gb_var.get(), "group_secondary_face_workers": self.group_secondary_face_workers_var.get(), "group_gpu_recycle_every": self.group_gpu_recycle_every_var.get(),
             "gap": self.gap_var.get(), "name_gap": self.name_gap_var.get(), "min_frames": self.min_frames_var.get(), "series_algorithm": self.series_algorithm_var.get(), "sequential_similarity": self.sequential_similarity_var.get(), "sequential_confirm_frames": self.sequential_confirm_frames_var.get(), "dbscan_distance": self.dbscan_distance_var.get(), "dbscan_min_samples": self.dbscan_min_samples_var.get(), "segment_merge_distance": self.segment_merge_distance_var.get(), "min_confirmed_frames": self.min_confirmed_frames_var.get(), "confirm_det_thresh": self.confirm_det_thresh_var.get(), "confirm_face_min_pct": self.confirm_face_min_pct_var.get(), "cross_merge_seconds": self.cross_merge_seconds_var.get(), "cross_merge_distance": self.cross_merge_distance_var.get(), "no_face_tolerance": self.no_face_tolerance_var.get(), "portrait_boundary_guard": self.portrait_boundary_guard_var.get(), "portrait_boundary_guard_window": self.portrait_boundary_guard_window_var.get(), "portrait_boundary_guard_min_evidence": self.portrait_boundary_guard_min_evidence_var.get(), "portrait_boundary_guard_distance": self.portrait_boundary_guard_distance_var.get(), "portrait_boundary_guard_margin": self.portrait_boundary_guard_margin_var.get(), "repeat_pose_mode": self._repeat_pose_mode_code(), "repeat_pose_max_series_gap": self.repeat_pose_max_series_gap_var.get(), "repeat_pose_max_seconds": self.repeat_pose_max_seconds_var.get(), "repeat_pose_min_evidence": self.repeat_pose_min_evidence_var.get(), "repeat_pose_distance": self.repeat_pose_distance_var.get(), "repeat_pose_pair_similarity": self.repeat_pose_pair_similarity_var.get(), "repeat_pose_vote_fraction": self.repeat_pose_vote_fraction_var.get(), "repeat_pose_cohesion": self.repeat_pose_cohesion_var.get(), "repeat_pose_margin": self.repeat_pose_margin_var.get(), "repeat_pose_max_yellows": self.repeat_pose_max_yellows_var.get(), "repeat_pose_min_pose_frames": self.repeat_pose_min_pose_frames_var.get(), "repeat_pose_min_head_conf": self.repeat_pose_min_head_conf_var.get(), "repeat_pose_yaw_delta": self.repeat_pose_yaw_delta_var.get(), "repeat_pose_pitch_delta": self.repeat_pose_pitch_delta_var.get(), "repeat_pose_center_shift": self.repeat_pose_center_shift_var.get(), "repeat_pose_scale_change": self.repeat_pose_scale_change_var.get(), "insightface_det_thresh": self.det_thresh_var.get(), "det_size_portrait": self.det_size_portrait_var.get(), "face_min_pct": self.face_min_pct_var.get(),
-            "eye_threshold": self.eye_threshold_var.get(), "prefer_open_eyes": self.prefer_open_eyes_var.get(), "eyes_weight": self.eyes_weight_var.get(), "closed_eye_penalty": self.closed_eye_penalty_var.get(), "eye_sharpness_weight": self.eye_sharpness_weight_var.get(), "face_sharpness_weight": self.face_sharpness_weight_var.get(), "expression_weight": self.expression_weight_var.get(), "smile_weight": self.smile_weight_var.get(), "technical_weight": self.technical_weight_var.get(),
+            "eye_threshold": self.eye_threshold_var.get(),
         })
-        self.cancel_event.set()
-        self.destroy()
+
+    def _on_close(self):
+        # Persist the current UI values independently from shutdown.  _start()
+        # also saves them, so saving must never cancel a run or destroy the GUI.
+        try:
+            self._save_current_ui_state()
+        finally:
+            self.cancel_event.set()
+            self.destroy()
 
 
 def _mapping_close(current: dict[str, object], profile: dict[str, object], tol: float = 1e-6) -> bool:
@@ -1925,8 +1560,9 @@ def _stats_text(stats) -> str:
             f"Объединено частей одной физической группы: {stats.group_blocks_merged}\n"
             f"Проблем на RED — глаза: {stats.group_eye_problems}\n"
             f"Проблем на RED — лицо не найдено: {stats.group_missing_problems}\n"
-            f"Проблем на RED — резкость глаз: {stats.group_sharpness_problems}\n"
-            f"Проблем на RED — прочее качество: {stats.group_quality_problems}\n"
+            f"Проблем на RED — резкость глаз/лица: {stats.group_sharpness_problems}\n"
+            f"Проблем на RED — техническое качество: {stats.group_quality_problems}\n"
+            f"Проблем на RED — поворот головы: {stats.group_pose_problems}\n"
             f"Проверка взгляда — серий с надёжными данными: {stats.group_camera_attention_series}\n"
             f"Проверка взгляда — лиц оценено на RED: {stats.group_camera_attention_known}\n"
             f"Проверка взгляда — уверенно смотрят в сторону на RED: {stats.group_camera_attention_away}\n"

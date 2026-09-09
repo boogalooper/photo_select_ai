@@ -60,6 +60,32 @@ class XmpWriter:
         self.config = config
         self.red = red_label_value(config)
         self.yellow = yellow_label_value(config)
+        xmp = config["xmp"]
+
+        def aliases(*values: object) -> tuple[str, ...]:
+            # Keep order stable and comparisons exact: Adobe label names are
+            # user-visible strings, not case-insensitive enum values.
+            result: list[str] = []
+            for value in values:
+                if value is None:
+                    continue
+                label = str(value)
+                if label and label not in result:
+                    result.append(label)
+            return tuple(result)
+
+        # Built-in Bridge and Lightroom values are always recognized during
+        # cleanup, so changing the scheme cannot leave the old colour behind.
+        # The currently active custom value is included as well; arbitrary XMP
+        # labels remain untouched.
+        self._red_labels = aliases(
+            self.red, xmp.get("bridge_red", "Select"), xmp.get("lightroom_red", "Red")
+        )
+        self._yellow_labels = aliases(
+            self.yellow,
+            xmp.get("bridge_yellow", "Second"),
+            xmp.get("lightroom_yellow", "Yellow"),
+        )
 
     def clear_label(self, photo: PhotoFile, role: str) -> bool:
         """Remove the configured RED or YELLOW xmp:Label, regardless of provenance.
@@ -70,16 +96,19 @@ class XmpWriter:
         """
         if role not in {"red", "yellow"}:
             raise ValueError(f"Unsupported selection role: {role}")
-        label = self.red if role == "red" else self.yellow
+        labels = self._red_labels if role == "red" else self._yellow_labels
         changed = False
         ext = photo.extension.lower()
 
+        def clear_first(clearer) -> bool:
+            return any(clearer(label) for label in labels)
+
         if ext in {".jpg", ".jpeg"} and bool(self.config["xmp"].get("jpeg_embedded", True)):
-            changed = self._clear_jpeg_embedded_label(photo.path, label) or changed
+            changed = clear_first(lambda label: self._clear_jpeg_embedded_label(photo.path, label)) or changed
         elif ext in _EMBEDDED_TIFF_XMP_EXTENSIONS:
-            changed = self._clear_fixed_embedded_label(photo.path, label, kind="tiff") or changed
+            changed = clear_first(lambda label: self._clear_fixed_embedded_label(photo.path, label, kind="tiff")) or changed
         elif ext == ".psd":
-            changed = self._clear_fixed_embedded_label(photo.path, label, kind="psd") or changed
+            changed = clear_first(lambda label: self._clear_fixed_embedded_label(photo.path, label, kind="psd")) or changed
 
         sidecar = photo.path.with_suffix(".xmp")
         update_sidecar = not (
@@ -89,11 +118,8 @@ class XmpWriter:
         if sidecar.exists() and update_sidecar:
             # A sidecar may coexist with embedded XMP.  Keep both stores free of
             # stale Photo Select AI labels while preserving every other field.
-            changed = self._clear_sidecar_label(sidecar, label) or changed
+            changed = clear_first(lambda label: self._clear_sidecar_label(sidecar, label)) or changed
         return changed
-
-    def clear_red_label(self, photo: PhotoFile) -> bool:
-        return self.clear_label(photo, "red")
 
     def _clear_sidecar_label(self, path: Path, expected_label: str) -> bool:
         original = path.read_bytes()
@@ -457,26 +483,6 @@ def _new_xmp_packet(label: str) -> bytes:
         + b'\n<?xpacket end="w"?>'
     )
 
-
-# Compatibility helpers retained for tests/tools that inspect a packet.
-def _serialize_xmp_packet(tree) -> bytes:  # pragma: no cover - legacy helper
-    import xml.etree.ElementTree as ET
-    xml = ET.tostring(tree.getroot(), encoding="utf-8", xml_declaration=False)
-    return (
-        b'<?xpacket begin="\xef\xbb\xbf" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
-        + xml
-        + b'\n<?xpacket end="w"?>'
-    )
-
-
-def _parse_xmp_payload(payload: bytes):
-    import xml.etree.ElementTree as ET
-    cleaned = re.sub(br"<\?xpacket\b.*?\?>", b"", payload, flags=re.DOTALL).strip()
-    try:
-        root = ET.fromstring(cleaned)
-    except ET.ParseError as exc:
-        raise RuntimeError("Existing embedded XMP is not valid XML") from exc
-    return ET.ElementTree(root)
 
 
 # ---------------------------------------------------------------------------

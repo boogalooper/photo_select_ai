@@ -1,12 +1,30 @@
-numpy>=1.26,<3
-Pillow>=10.4,<13
-opencv-python>=4.10,<5
-rawpy>=0.27,<0.28
-ExifRead>=3.0,<4
-psutil>=6,<8
-onnx>=1.17,<2
-scipy>=1.13,<2
-scikit-image>=0.24,<1
-scikit-learn>=1.5,<2
-tqdm>=4.66,<5
-requests>=2.32,<3
+numpy==1.26.4
+Pillow==10.4.0
+opencv-python==4.10.0.84
+rawpy==0.27.0
+ExifRead==3.0.0
+psutil==6.0.0
+onnx==1.17.0
+scipy==1.13.1
+scikit-image==0.24.0
+scikit-learn==1.5.2
+tqdm==4.66.5
+requests==2.32.3
+
+# Complete transitive closure for the application packages and ONNX Runtime.
+# install.bat uses --no-deps, so a future metadata change cannot silently add
+# or upgrade packages outside this reviewed set.
+protobuf==7.36.1
+flatbuffers==25.12.19
+networkx==3.6.1
+imageio==2.37.4
+tifffile==2026.3.3
+packaging==26.3
+lazy-loader==0.5
+joblib==1.6.0
+threadpoolctl==3.6.0
+cloudpickle==3.1.2
+charset-normalizer==3.5.1
+idna==3.19
+urllib3==2.7.0
+certifi==2026.7.22

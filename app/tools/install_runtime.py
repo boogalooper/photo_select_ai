@@ -42,11 +42,11 @@ def install_ort() -> int:
             "nvidia-curand-cu12==10.3.9.90",
             "nvidia-cudnn-cu12==9.24.0.43",
         )
-        rc = pip_install(*gpu_packages)
+        rc = pip_install("--no-deps", *gpu_packages)
         if rc == 0:
             return 0
         print("GPU runtime installation failed; falling back to CPU ONNX Runtime 1.26.0.")
-    return pip_install("onnxruntime==1.26.0")
+    return pip_install("--no-deps", "onnxruntime==1.26.0")
 
 
 def main() -> int:

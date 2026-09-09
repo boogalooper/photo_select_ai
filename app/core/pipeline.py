@@ -19,7 +19,7 @@ from app.analysis.grouping import (
     split_group_candidate_by_identity,
     stabilize_group_frame_order,
 )
-from app.analysis.scoring import select_portrait
+from app.analysis.scoring import select_portrait, sort_portrait_selections
 from app.core.models import FrameAssessment, RunStats, Selection
 from app.core.preview import load_preview
 from app.core.scanner import ScanReport, scan_photos
@@ -123,8 +123,6 @@ class AnalysisPipeline:
         photos,
         writer: XmpWriter,
         selections: list[Selection],
-        clear_red: bool,
-        clear_yellow: bool,
         stats: RunStats,
         metadata_plan: dict[str, str] | None = None,
     ) -> None:
@@ -161,44 +159,39 @@ class AnalysisPipeline:
             "после начала commit отмена применяется только к следующему запуску."
         )
 
-        # The clear options are intentionally literal.  When enabled, remove
-        # the configured RED/YELLOW label from every discovered physical file,
-        # including resources that will be selected again by this run.  This
-        # makes the result independent of labels left by earlier runs or by a
-        # different application/user.  Only after this complete cleanup pass do
-        # we write the new metadata plan.
-        if clear_red or clear_yellow:
-            self.message(
-                "Финальная запись: сначала очищаются все найденные старые "
-                "RED/YELLOW, затем записывается новый план."
+        # RED and YELLOW cleanup is unconditional. The final plan must never
+        # depend on labels left by a previous run. Cleanup is still deferred
+        # until all analysis has completed successfully, so cancellation/errors
+        # before commit leave the existing metadata untouched.
+        self.message(
+            "Финальная запись: сначала очищаются все найденные старые "
+            "RED/YELLOW, затем записывается новый план."
+        )
+        for completed, key in enumerate(resource_keys, start=1):
+            physical = sorted(
+                resources[key],
+                key=lambda photo: (
+                    photo.extension.lower() in {".jpg", ".jpeg"},
+                    str(photo.path).casefold(),
+                ),
             )
-            for completed, key in enumerate(resource_keys, start=1):
-                physical = sorted(
-                    resources[key],
-                    key=lambda photo: (
-                        photo.extension.lower() in {".jpg", ".jpeg"},
-                        str(photo.path).casefold(),
-                    ),
-                )
-                resource_cleared = False
-                for photo in physical:
-                    try:
-                        if clear_red:
-                            resource_cleared = writer.clear_label(photo, "red") or resource_cleared
-                        if clear_yellow:
-                            resource_cleared = writer.clear_label(photo, "yellow") or resource_cleared
-                    except Exception as exc:
-                        metadata_error_keys.add(key)
-                        self.log.error(
-                            "Final metadata clear failed for %s: %s",
-                            photo.path, exc, exc_info=(type(exc), exc, exc.__traceback__),
-                        )
-                if resource_cleared:
-                    stats.labels_cleared_before_run += 1
-                self.progress(
-                    99.0 + 0.45 * completed / total,
-                    f"Финальная запись: очистка {completed}/{len(resource_keys)}",
-                )
+            resource_cleared = False
+            for photo in physical:
+                try:
+                    resource_cleared = writer.clear_label(photo, "red") or resource_cleared
+                    resource_cleared = writer.clear_label(photo, "yellow") or resource_cleared
+                except Exception as exc:
+                    metadata_error_keys.add(key)
+                    self.log.error(
+                        "Final metadata clear failed for %s: %s",
+                        photo.path, exc, exc_info=(type(exc), exc, exc.__traceback__),
+                    )
+            if resource_cleared:
+                stats.labels_cleared_before_run += 1
+            self.progress(
+                99.0 + 0.45 * completed / total,
+                f"Финальная запись: очистка {completed}/{len(resource_keys)}",
+            )
 
         selected_keys = [key for key in resource_keys if key in plan]
         selected_total = max(1, len(selected_keys))
@@ -227,6 +220,18 @@ class AnalysisPipeline:
             )
 
         stats.metadata_errors += len(metadata_error_keys)
+        if metadata_error_keys:
+            self.progress(99.9, "Ошибка финальной записи меток")
+            self.message(
+                f"ОШИБКА финальной записи: {len(metadata_error_keys)} ресурс(а/ов) не удалось "
+                "полностью очистить или записать. Метаданные могли быть изменены частично; "
+                "запуск НЕ считается успешным. Подробности записаны в журнал."
+            )
+            raise MetadataCommitError(
+                f"Финальная запись RED/YELLOW завершилась с ошибками для "
+                f"{len(metadata_error_keys)} ресурс(а/ов). Метаданные могли быть изменены частично. "
+                "Проверьте журнал и повторите запуск после устранения причины."
+            )
 
     def _record_preview_source(self, source: str) -> None:
         stats = self._active_stats
@@ -327,10 +332,10 @@ class AnalysisPipeline:
         return bool(self.config.get("runtime", {}).get("gpu_memory_safe_mode", True))
 
     def _secondary_face_workers(self) -> int:
-        """Worker cap for Group high-res/gaze stages.
+        """Worker cap for the final Group gaze stage.
 
         The main pass over hundreds of files can benefit from all requested GPU
-        sessions.  A group gaze shortlist is normally only three frames, so
+        sessions.  A group gaze shortlist is normally only a few frames, so
         keeping four complete buffalo_l/ORT applications resident there wastes
         VRAM without useful parallelism.  Safe mode therefore applies a separate
         cap to the secondary Group stages.
@@ -534,7 +539,7 @@ class AnalysisPipeline:
             writer = XmpWriter(self.config)
             portrait_repeat_mode = str(
                 self.config.get("portrait", {}).get("repeat_pose_mode", "off")
-            ).lower() in {"red_yellow", "first_red_rest_yellow", "best_red_pose_yellow"}
+            ).lower() == "best_red_pose_yellow"
             if self.mode == "group":
                 self.message(f"XMP: главный кадр RED='{writer.red}', дополнительные YELLOW='{writer.yellow}'")
             elif portrait_repeat_mode:
@@ -545,12 +550,6 @@ class AnalysisPipeline:
             else:
                 self.message(f"XMP: лучший портрет RED='{writer.red}'")
 
-            clear_red = bool(self.config.get("xmp", {}).get("clear_red_before_run", True))
-            clear_yellow = (
-                bool(self.config.get("xmp", {}).get("clear_yellow_before_run", True))
-                if self.mode == "group" or (self.mode == "portrait" and portrait_repeat_mode)
-                else False
-            )
             analyzers, backend_name = self._create_analyzer_pool(self.config, "Основной анализ")
             self.message(f"Распознавание лиц: {backend_name}")
             processed_files = 0
@@ -622,11 +621,40 @@ class AnalysisPipeline:
             else:
                 self._run_portrait_mode(all_candidate_assessments, writer, stats, selections)
 
+            # Never replace a previous RED/YELLOW plan with an empty or known
+            # incomplete plan. A successful analysis run is a selection task,
+            # not a hidden "clear all labels" command. This also protects a
+            # shoot when face tracking/series refinement found a plausible
+            # series but could not choose its RED. XMP is still untouched here.
+            if stats.series_without_selection > 0:
+                self.message(
+                    f"Не удалось выбрать RED для {stats.series_without_selection} подтверждённой "
+                    "серии. Финальная запись не начата; существующие RED/YELLOW сохранены."
+                )
+                raise AnalysisIncompleteError(
+                    f"Не удалось сформировать полный план: {stats.series_without_selection} "
+                    "серии остались без RED. Для безопасности метки не изменялись."
+                )
+            has_red = any(str(selection.label_role).lower() == "red" for selection in selections)
+            if not selections or not has_red:
+                self.message(
+                    "Подходящие серии/кадры для RED не найдены. Финальная запись не начата; "
+                    "существующие RED/YELLOW сохранены."
+                )
+                raise AnalysisIncompleteError(
+                    "Не удалось сформировать ни одного RED. Для безопасности существующие "
+                    "метки не изменялись."
+                )
+
             self.progress(99.0, "План меток: формирование итогового RED/YELLOW плана")
             metadata_plan = self._build_metadata_plan(selections)
+            if not metadata_plan:
+                raise AnalysisIncompleteError(
+                    "Внутренняя ошибка: итоговый план RED/YELLOW пуст. Метки не изменялись."
+                )
             self.message(f"План меток: логических ресурсов выбрано={len(metadata_plan)}")
             self._apply_metadata_changes(
-                metadata_photos, writer, selections, clear_red, clear_yellow, stats, metadata_plan
+                metadata_photos, writer, selections, stats, metadata_plan
             )
         finally:
             self._active_stats = None
@@ -658,9 +686,7 @@ class AnalysisPipeline:
         stats.refined_series = len(all_refined)
 
         repeat_mode = str(self.config.get("portrait", {}).get("repeat_pose_mode", "off")).lower()
-        repeat_enabled = repeat_mode in {
-            "red_yellow", "first_red_rest_yellow", "best_red_pose_yellow"
-        }
+        repeat_enabled = repeat_mode == "best_red_pose_yellow"
         repeat_links = link_repeated_portrait_series(all_refined, self.config)
         child_ids = (
             repeat_links.child_ids
@@ -866,7 +892,7 @@ class AnalysisPipeline:
 
             # When there are more genuine poses than the configured cap, retain
             # the strongest portrait from each pose, then keep the best ones.
-            yellow_candidates.sort(key=lambda sel: sel.score, reverse=True)
+            yellow_candidates = sort_portrait_selections(yellow_candidates, self.config)
             for yellow in yellow_candidates[:max_yellows]:
                 selections.append(yellow)
                 stats.portrait_repeat_yellow_selected += 1
@@ -876,22 +902,6 @@ class AnalysisPipeline:
                 )
 
         self.progress(99.0, "Завершение портретного анализа...")
-
-    def _group_rescue_config(self) -> dict:
-        """Second-pass InsightFace profile for missed small/weak group faces."""
-        result = deepcopy(self.config)
-        analysis = result.setdefault("analysis", {})
-        group = result.setdefault("group", {})
-        source_group = self.config.get("group", {})
-        analysis["insightface_det_size_group"] = int(source_group.get("highres_rescue_det_size", 1536))
-        analysis["insightface_det_thresh_group"] = float(source_group.get("highres_rescue_det_thresh", 0.14))
-        rescue_fraction = float(source_group.get("highres_rescue_min_face_fraction", 0.00018))
-        analysis["face_min_fraction"] = min(float(analysis.get("face_min_fraction", 0.0005)), rescue_fraction)
-        group["track_det_thresh"] = float(source_group.get("highres_rescue_det_thresh", 0.14))
-        group["min_track_face_fraction"] = rescue_fraction
-        group["promote_singleton_tracks"] = False
-        return result
-
 
     def _group_attention_config(self) -> dict:
         """Final-stage high-resolution profile for camera-attention analysis."""
@@ -906,7 +916,10 @@ class AnalysisPipeline:
         analysis["face_min_fraction"] = float(source_group.get("min_track_face_fraction", analysis.get("face_min_fraction", 0.0005)))
         group["track_det_thresh"] = float(source_group.get("camera_attention_det_thresh", 0.20))
         group["camera_attention_enabled"] = True
-        group["promote_singleton_tracks"] = False
+        # The dedicated high-resolution attention analyzer does not need to
+        # reload/run the FBP model: portrait preference was already measured on
+        # the normal pass.
+        group["portrait_preference_enabled"] = False
         return result
 
     def _analyze_group_attention_shortlist(
@@ -945,46 +958,10 @@ class AnalysisPipeline:
             )
         return out
 
-    def _analyze_group_highres(
-        self,
-        frames: list[FrameAssessment],
-        analyzers,
-        rescue_config: dict,
-        group_idx: int,
-        group_count: int,
-        progress_start: float,
-        progress_end: float,
-    ) -> list[FrameAssessment]:
-        """Re-run one confirmed physical group with the sensitive detector."""
-        preview_cfg = self.config.get("preview", {})
-        group_cfg = self.config.get("group", {})
-        long_edge = int(group_cfg.get("highres_rescue_preview_long_edge", preview_cfg.get("group_long_edge", 3200)))
-        fallback_half = bool(preview_cfg.get("raw_fallback_half_size", True))
-        out: list[FrameAssessment | None] = [None] * len(frames)
-        total = max(1, len(frames))
-        jobs = [(idx, frame.photo) for idx, frame in enumerate(frames)]
-        for no, (frame_idx, assessment, error) in enumerate(
-            self._iter_analyzed_frames(jobs, analyzers, long_edge, fallback_half), start=1
-        ):
-            self._check_cancelled()
-            frame = frames[frame_idx]
-            if error is not None or assessment is None:
-                exc = error or RuntimeError("Unknown high-res analysis error")
-                self.log.error("High-res group rescue failed for %s: %s", frame.photo.path, exc)
-                assessment = FrameAssessment(photo=frame.photo, faces=[], technical=frame.technical, error=str(exc))
-            out[frame_idx] = assessment
-            pct = progress_start + (progress_end - progress_start) * no / total
-            self.progress(
-                pct,
-                f"Группа {group_idx}/{group_count}: high-res поиск пропущенных лиц {no}/{len(frames)}",
-            )
-        return [frame for frame in out if frame is not None]
-
     def _run_group_mode(self, candidates: list[list[FrameAssessment]], writer: XmpWriter, stats: RunStats, selections: list[Selection]) -> None:
-        min_frames = int(self.config.get("group", {}).get("min_frames", self.config.get("series", {}).get("group_min_frames", 2)))
+        min_frames = int(self.config.get("group", {}).get("min_frames", 2))
         group_like: list[list[FrameAssessment]] = []
         rejected = 0
-        total_candidates = max(1, len(candidates))
         split_weight_total = max(1, sum(max(1, len(a)) for a in candidates))
         split_weight_done = 0
         self.progress(55.0, f"Разделение физических групп: 0/{len(candidates)} временных блоков")
@@ -1084,37 +1061,10 @@ class AnalysisPipeline:
                 secondary_workers, mem_limit_gb, recycle_every,
             )
             self.message(
-                f"Защита VRAM: secondary Group-этапы до {secondary_workers} GPU-сессий; "
+                f"Защита VRAM: финальный Group gaze-этап до {secondary_workers} GPU-сессий; "
                 f"CUDA-arena бюджет на InsightFace-worker {mem_limit_gb:.1f} ГБ"
                 + (f"; перезапуск gaze-сессий каждые {recycle_every} групп" if recycle_every else "")
             )
-
-        rescue_enabled = bool(self.config.get("group", {}).get("highres_rescue_enabled", False))
-        rescue_analyzers: list = []
-        rescue_config: dict | None = None
-        if rescue_enabled:
-            self.progress(62.0, "Загрузка high-res модели для поиска пропущенных лиц...")
-            rescue_config = self._group_rescue_config()
-            det_size = int(rescue_config.get("analysis", {}).get("insightface_det_size_group", 1536))
-            det_thresh = float(rescue_config.get("analysis", {}).get("insightface_det_thresh_group", 0.14))
-            min_fraction = float(rescue_config.get("group", {}).get("min_track_face_fraction", 0.00018))
-            self.log.info(
-                "GROUP HIGHRES PASS START | det_size=%d | det_thresh=%.3f | min_face_fraction=%.6f",
-                det_size, det_thresh, min_fraction,
-            )
-            self.message(
-                f"High-res поиск пропущенных лиц: detector={det_size}px, threshold={det_thresh:.2f}; "
-                "новое лицо требуется подтвердить на нескольких дублях"
-            )
-            try:
-                rescue_analyzers, rescue_backend = self._create_analyzer_pool(
-                    rescue_config, "High-res поиск лиц", max_workers=secondary_workers
-                )
-                self.message(f"High-res распознавание: {rescue_backend}")
-            except Exception as exc:
-                self.log.exception("Could not start high-res group rescue; using stable primary roster only")
-                self.message(f"High-res поиск лиц недоступен ({exc}). Продолжаю по устойчивому основному составу.")
-                rescue_analyzers = []
 
         attention_enabled = bool(self.config.get("group", {}).get("camera_attention_enabled", False))
         attention_analyzers: list = []
@@ -1122,7 +1072,7 @@ class AnalysisPipeline:
         if attention_enabled:
             attention_config = self._group_attention_config()
             preview_edge = int(self.config.get("group", {}).get("camera_attention_preview_long_edge", 4800))
-            shortlist = int(self.config.get("group", {}).get("camera_attention_shortlist", 3))
+            shortlist = int(self.config.get("group", {}).get("camera_attention_shortlist", 5))
             self.log.info(
                 "GROUP CAMERA ATTENTION START | shortlist=%d | preview=%d | det_size=%d | det_thresh=%.3f",
                 shortlist,
@@ -1133,27 +1083,22 @@ class AnalysisPipeline:
             self.message(
                 f"Взгляд в камеру: финальная high-res проверка {shortlist} лучших дублей каждой группы"
             )
-            # When face rescue is enabled, reuse its already-loaded pool for the
-            # shortlist. Otherwise create a dedicated pool with the gaze profile.
-            if not rescue_analyzers:
-                self.progress(62.0, "Загрузка модели финальной проверки взгляда...")
-                try:
-                    attention_analyzers, attention_backend = self._create_analyzer_pool(
-                        attention_config, "Проверка взгляда",
-                        max_workers=min(secondary_workers, max(1, shortlist)),
-                    )
-                    self.message(f"Проверка взгляда: {attention_backend}")
-                except Exception as exc:
-                    self.log.exception("Could not start camera-attention analyzer; continuing without gaze")
-                    self.message(f"Проверка взгляда недоступна ({exc}). Продолжаю без критерия взгляда.")
-                    attention_enabled = False
-                    attention_analyzers = []
+            self.progress(62.0, "Загрузка модели финальной проверки взгляда...")
+            try:
+                attention_analyzers, attention_backend = self._create_analyzer_pool(
+                    attention_config, "Проверка взгляда",
+                    max_workers=min(secondary_workers, max(1, shortlist)),
+                )
+                self.message(f"Проверка взгляда: {attention_backend}")
+            except Exception as exc:
+                self.log.exception("Could not start camera-attention analyzer; continuing without gaze")
+                self.message(f"Проверка взгляда недоступна ({exc}). Продолжаю без критерия взгляда.")
+                attention_enabled = False
+                attention_analyzers = []
 
         def recycle_dedicated_attention_pool(group_idx: int) -> None:
             nonlocal attention_analyzers, attention_enabled
-            # Only a dedicated gaze pool is recycled here. If gaze reuses the
-            # high-res rescue pool, the per-session memory cap + worker cap still
-            # protect VRAM without repeatedly rebuilding the rescue models.
+            # Recycle the dedicated gaze pool periodically in safe-VRAM mode.
             if (
                 recycle_every <= 0
                 or not attention_analyzers
@@ -1170,7 +1115,7 @@ class AnalysisPipeline:
             self._close_analyzer_pool(attention_analyzers)
             attention_analyzers = []
             try:
-                shortlist = int(self.config.get("group", {}).get("camera_attention_shortlist", 3))
+                shortlist = int(self.config.get("group", {}).get("camera_attention_shortlist", 5))
                 attention_analyzers, attention_backend = self._create_analyzer_pool(
                     attention_config, "Проверка взгляда",
                     max_workers=min(secondary_workers, max(1, shortlist)),
@@ -1193,16 +1138,7 @@ class AnalysisPipeline:
                 group_start = 62.0 + 36.0 * completed_weight / total_weight
                 group_end = 62.0 + 36.0 * (completed_weight + weight) / total_weight
                 span = group_end - group_start
-                if rescue_analyzers and rescue_config is not None:
-                    rescue_end = group_start + span * (0.34 if attention_enabled else 0.42)
-                    rescue_frames = self._analyze_group_highres(
-                        frames, rescue_analyzers, rescue_config, group_idx, len(group_like),
-                        group_start, rescue_end,
-                    )
-                    preliminary_start = rescue_end
-                else:
-                    rescue_frames = None
-                    preliminary_start = group_start
+                preliminary_start = group_start
 
                 if attention_enabled:
                     preliminary_end = group_start + span * 0.56
@@ -1223,39 +1159,59 @@ class AnalysisPipeline:
                 stats.series_processed += 1
                 stats.group_series += 1
                 result, diag = select_group_series(
-                    frames, self.config, progress=preliminary_progress, rescue_frames=rescue_frames,
+                    frames, self.config, progress=preliminary_progress,
                     diagnostic_log=not attention_enabled,
                 )
 
                 if attention_enabled and result.main is not None:
-                    gaze_analyzers = rescue_analyzers if rescue_analyzers else attention_analyzers
-                    attention_frames = None
+                    gaze_analyzers = attention_analyzers
+                    attention_frames: dict[int, FrameAssessment] = {}
                     if gaze_analyzers:
-                        attention_frames = self._analyze_group_attention_shortlist(
-                            frames, diag.camera_attention_shortlist_indices, gaze_analyzers,
-                            group_idx, len(group_like), gaze_start, gaze_end,
-                        )
+                        attempted: set[int] = set()
+                        while True:
+                            pending = [
+                                idx for idx in diag.camera_attention_shortlist_indices
+                                if idx not in attempted
+                            ]
+                            if not pending:
+                                break
+                            progress_denominator = max(
+                                1, len(diag.camera_attention_candidate_indices)
+                            )
+                            batch_start = gaze_start + (gaze_end - gaze_start) * len(attempted) / progress_denominator
+                            attempted.update(pending)
+                            batch_end = gaze_start + (gaze_end - gaze_start) * len(attempted) / progress_denominator
+                            attention_frames.update(
+                                self._analyze_group_attention_shortlist(
+                                    frames, pending, gaze_analyzers,
+                                    group_idx, len(group_like), batch_start, batch_end,
+                                )
+                            )
+                            result, diag = select_group_series(
+                                frames, self.config, progress=None,
+                                attention_frames=attention_frames, diagnostic_log=False,
+                            )
                     if attention_frames:
                         def final_progress(local: float, detail: str, *, _start=selection_start, _end=selection_end, _idx=group_idx):
                             local = max(0.0, min(1.0, float(local)))
                             pct = _start + (_end - _start) * local
                             self.progress(pct, f"Группа {_idx}/{len(group_like)}: {detail}")
                         result, diag = select_group_series(
-                            frames, self.config, progress=final_progress, rescue_frames=rescue_frames,
+                            frames, self.config, progress=final_progress,
                             attention_frames=attention_frames, diagnostic_log=True,
                         )
                     else:
                         # Preliminary pass suppressed frame logs because gaze was
                         # expected. If gaze failed, emit one normal diagnostic pass.
                         result, diag = select_group_series(
-                            frames, self.config, progress=None, rescue_frames=rescue_frames,
-                            diagnostic_log=True,
+                            frames, self.config, progress=None, diagnostic_log=True,
                         )
                 stats.group_tracks_confirmed += diag.confirmed_tracks
                 stats.group_eye_problems += diag.eye_problems
                 stats.group_missing_problems += diag.missing_problems
                 stats.group_sharpness_problems += diag.sharpness_problems
                 stats.group_quality_problems += diag.quality_problems
+                stats.group_pose_problems += diag.pose_problems
                 stats.group_camera_attention_known += diag.camera_attention_known
                 stats.group_camera_attention_away += diag.camera_attention_away
                 if diag.camera_attention_known > 0:
@@ -1264,14 +1220,11 @@ class AnalysisPipeline:
                 stats.group_problems_unresolved += diag.unresolved_problems
                 stats.group_backup_candidates += diag.backup_extras
                 if result.main is not None:
-                    roster_text = f"состав={diag.confirmed_tracks} (stable={diag.stable_tracks}"
-                    if diag.highres_rescue_tracks:
-                        roster_text += f", high-res +{diag.highres_rescue_tracks}"
-                    roster_text += ")"
+                    roster_text = f"состав={diag.confirmed_tracks} (stable={diag.stable_tracks})"
                     self.message(
                         f"Группа {group_idx}: {roster_text}; на RED проблем: глаза={diag.eye_problems}, "
                         f"нет лица={diag.missing_problems}, резкость={diag.sharpness_problems}, "
-                        f"качество={diag.quality_problems}; "
+                        f"качество={diag.quality_problems}, поворот головы={diag.pose_problems}; "
                         f"взгляд-в-сторону={diag.camera_attention_away}/{diag.camera_attention_known}; "
                         f"закрыто YELLOW={diag.covered_problems}, без подходящего дубля={diag.unresolved_problems}"
                     )
@@ -1300,7 +1253,6 @@ class AnalysisPipeline:
                 self.progress(group_end, f"Группа {group_idx}/{len(group_like)} готова")
                 recycle_dedicated_attention_pool(group_idx)
         finally:
-            self._close_analyzer_pool(rescue_analyzers)
             self._close_analyzer_pool(attention_analyzers)
 
         self.progress(99.0, "Завершение группового анализа...")
@@ -1309,9 +1261,8 @@ class AnalysisPipeline:
     def _count_metadata_write(stats: RunStats, item, destination: Path) -> None:
         """Count the actual metadata destination returned by XmpWriter.
 
-        The old implementation inferred storage from the source extension and
-        therefore reported every PSD/TIFF/DNG write as a sidecar even when XMP
-        was embedded successfully.
+        Count from the actual metadata destination rather than inferring
+        storage from the source extension.
         """
         photo = item.photo if isinstance(item, Selection) else item
         stats.xmp_written += 1
@@ -1329,7 +1280,11 @@ class AnalysisPipeline:
 
 
 class AnalysisIncompleteError(RuntimeError):
-    """Primary frame analysis was incomplete, so deferred metadata commit is forbidden."""
+    """Primary analysis or final commit did not complete safely."""
+
+
+class MetadataCommitError(AnalysisIncompleteError):
+    """Final XMP commit was only partially successful; the run must fail."""
 
 
 class CancelledError(RuntimeError):

@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from copy import deepcopy
 import logging
+import math
 from statistics import median
 from typing import Callable
 
 from app.analysis.matching import cosine_similarity
 from app.core.models import FaceAssessment, FrameAssessment, Selection
+
+
+_GROUP_DEFECT_KEY_LEN = 10
+_GROUP_PREFERENCE_RANK_LEN = 4
 
 
 @dataclass(slots=True)
@@ -39,8 +43,6 @@ class PersonTrack:
 class GroupSeriesSelection:
     main: Selection | None
     extras: list[Selection]
-    track_count: int
-    rejected_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -48,23 +50,24 @@ class GroupDiagnostics:
     tracks_built: int = 0
     confirmed_tracks: int = 0
     stable_tracks: int = 0
-    promoted_tracks: int = 0
-    highres_rescue_tracks: int = 0
     max_faces_in_frame: int = 0
-    highres_max_faces_in_frame: int = 0
-    highres_tracks_built: int = 0
-    candidate_extras: int = 0
     eye_problems: int = 0
     missing_problems: int = 0
     sharpness_problems: int = 0
     quality_problems: int = 0
+    pose_problems: int = 0
     covered_problems: int = 0
     unresolved_problems: int = 0
     backup_extras: int = 0
     camera_attention_shortlist_indices: list[int] = field(default_factory=list)
+    camera_attention_candidate_indices: list[int] = field(default_factory=list)
     camera_attention_known: int = 0
     camera_attention_away: int = 0
     camera_attention_mean: float = 0.0
+    portrait_preference_known: int = 0
+    portrait_preferred_faces: int = 0
+    portrait_preference_mean: float = 0.50
+    portrait_preference_worst: float = 0.50
 
 
 def _face_quality(face: FaceAssessment, eye_threshold: float) -> float:
@@ -246,98 +249,6 @@ def _adaptive_eye_limits(tracks: list[PersonTrack], config: dict) -> tuple[dict[
 
 
 
-def _promote_plausible_singletons(
-    stable: list[PersonTrack],
-    candidates: list[PersonTrack],
-    config: dict,
-) -> list[PersonTrack]:
-    """Recover a real group member that was detected in only one take.
-
-    Group photographs are unusually friendly to positional reasoning: the people
-    stay in roughly the same arrangement for consecutive takes.  Requiring two
-    detections for every person is therefore unnecessarily strict and causes the
-    displayed roster (and RED scoring) to under-count children that the detector
-    misses on one take.
-
-    We do *not* simply accept every one-frame detection.  A singleton is promoted
-    only when it lies inside the spatial envelope of the already stable group and
-    has a face size compatible with that group.  This keeps small/background
-    bystanders from entering the roster.
-    """
-    cfg = config.get("group", {})
-    if not bool(cfg.get("promote_singleton_tracks", False)):
-        return []
-    min_people = max(2, int(cfg.get("min_people", 4)))
-    if len(stable) < min_people:
-        return []
-
-    centers = [_track_median_center(t) for t in stable]
-    sizes = [_track_median_size(t) for t in stable if _track_median_size(t) > 0]
-    if not centers or not sizes:
-        return []
-    xs = [c[0] for c in centers]
-    ys = [c[1] for c in centers]
-    xmin, xmax = min(xs), max(xs)
-    ymin, ymax = min(ys), max(ys)
-    pad_factor = max(0.0, float(cfg.get("singleton_roi_padding", 0.10)))
-    min_pad = max(0.0, float(cfg.get("singleton_min_roi_padding", 0.045)))
-    # Allow roughly one missing grid position beyond the stable envelope.
-    # This matters when the only missed child stands at the far left/right edge.
-    nn_distances: list[float] = []
-    if len(centers) >= 2:
-        for i, (cx, cy) in enumerate(centers):
-            nearest = min(
-                (((cx - ox) ** 2 + (cy - oy) ** 2) ** 0.5)
-                for j, (ox, oy) in enumerate(centers) if j != i
-            )
-            nn_distances.append(nearest)
-    neighbor_pad = (
-        float(median(nn_distances))
-        * max(0.0, float(cfg.get("singleton_neighbor_pad_factor", 1.05)))
-        if nn_distances else 0.0
-    )
-    padx = max(min_pad, (xmax - xmin) * pad_factor, neighbor_pad)
-    pady = max(min_pad, (ymax - ymin) * pad_factor, neighbor_pad)
-    median_size = float(median(sizes))
-    min_size_ratio = max(0.05, min(1.0, float(cfg.get("singleton_min_size_ratio", 0.38))))
-    min_det = max(0.0, min(1.0, float(cfg.get("singleton_det_thresh", cfg.get("track_det_thresh", 0.22)))))
-    dup_dist = max(0.005, min(0.10, float(cfg.get("singleton_duplicate_distance", 0.025))))
-
-    promoted: list[PersonTrack] = []
-    for track in candidates:
-        # At the default min_track_presence=2 these are exactly one-frame
-        # fragments.  If a user raises that setting, do not promote a more
-        # ambiguous multi-frame fragment automatically.
-        if len(track.observations) != 1:
-            continue
-        frame_idx, face = track.observations[0]
-        if face.detection_confidence < min_det:
-            continue
-        if face.size_fraction < median_size * min_size_ratio:
-            continue
-        x, y = face.center
-        if not (xmin - padx <= x <= xmax + padx and ymin - pady <= y <= ymax + pady):
-            continue
-
-        # Reject an accidental duplicate detection sitting almost on top of an
-        # already stable face in the same take.
-        duplicate = False
-        for stable_track in stable:
-            for stable_frame_idx, stable_face in stable_track.observations:
-                if stable_frame_idx != frame_idx:
-                    continue
-                dx = x - stable_face.center[0]
-                dy = y - stable_face.center[1]
-                if (dx * dx + dy * dy) ** 0.5 <= dup_dist:
-                    duplicate = True
-                    break
-            if duplicate:
-                break
-        if not duplicate:
-            promoted.append(track)
-    return promoted
-
-
 def build_person_tracks(
     frames: list[FrameAssessment],
     config: dict,
@@ -396,12 +307,14 @@ def build_person_tracks(
     raw_track_count = len(tracks)
     tracks = _merge_fragmented_tracks(tracks, config)
     min_presence = max(1, int(cfg.get("min_track_presence", 2)))
+    min_presence_fraction = max(
+        0.0, min(1.0, float(cfg.get("min_track_presence_fraction", 0.25)))
+    )
+    min_presence = max(min_presence, math.ceil(len(frames) * min_presence_fraction))
     stable = [t for t in tracks if len(t.observations) >= min_presence]
-    not_stable = [t for t in tracks if len(t.observations) < min_presence]
-    promoted = _promote_plausible_singletons(stable, not_stable, config)
-    roster = stable + promoted
+    roster = stable
 
-    # Deterministic top-to-bottom/left-to-right IDs after recovery.
+    # Deterministic top-to-bottom/left-to-right IDs.
     roster.sort(key=lambda t: (_track_median_center(t)[1], _track_median_center(t)[0], t.track_id))
     for new_id, track in enumerate(roster, start=1):
         track.track_id = new_id
@@ -417,196 +330,137 @@ def build_person_tracks(
     if progress:
         merged_count = max(0, raw_track_count - len(tracks))
         details = [f"устойчивых={len(stable)}"]
-        if promoted:
-            details.append(f"восстановлено={len(promoted)}")
         if merged_count:
             details.append(f"склеено фрагментов={merged_count}")
         progress(0.55, f"людей в составе: {len(roster)} ({'; '.join(details)})")
     if log_roster:
         log = logging.getLogger("photo_select_ai")
         log.info(
-            "GROUP ROSTER | people=%d | stable=%d | promoted=%d | max_faces_frame=%d | raw_tracks=%d",
-            len(roster), len(stable), len(promoted), max_faces, raw_track_count,
+            "GROUP ROSTER | people=%d | stable=%d | max_faces_frame=%d | raw_tracks=%d",
+            len(roster), len(stable), max_faces, raw_track_count,
         )
     return roster, GroupDiagnostics(
         tracks_built=raw_track_count,
         confirmed_tracks=len(roster),
         stable_tracks=len(stable),
-        promoted_tracks=len(promoted),
         max_faces_in_frame=max_faces,
     )
 
 
 
-def _median_nearest_neighbor_distance(centers: list[tuple[float, float]]) -> float:
-    if len(centers) < 2:
-        return 0.08
-    distances: list[float] = []
-    for i, (cx, cy) in enumerate(centers):
-        nearest = min(
-            ((cx - ox) ** 2 + (cy - oy) ** 2) ** 0.5
-            for j, (ox, oy) in enumerate(centers)
-            if j != i
-        )
-        distances.append(nearest)
-    return float(median(distances)) if distances else 0.08
-
-
-def _highres_rescue_tracking_config(config: dict, frame_count: int) -> dict:
-    """Build a conservative tracking profile for the second detector pass.
-
-    The detector itself is configured by the pipeline at a larger det_size and
-    lower confidence threshold.  Here we only tell the tracker to accept those
-    weaker detections, require repeated observations, and never revive a
-    one-frame singleton.
-    """
-    result = deepcopy(config)
-    cfg = result.setdefault("group", {})
-    primary = config.get("group", {})
-    min_presence = max(2, int(primary.get("highres_rescue_min_presence", 2)))
-    fraction = max(0.0, min(1.0, float(primary.get("highres_rescue_min_presence_fraction", 0.0))))
-    if fraction > 0.0:
-        min_presence = max(min_presence, int(round(frame_count * fraction)))
-    cfg["min_track_presence"] = min_presence
-    cfg["track_det_thresh"] = float(primary.get("highres_rescue_det_thresh", 0.14))
-    cfg["min_track_face_fraction"] = float(primary.get("highres_rescue_min_face_fraction", 0.00018))
-    cfg["promote_singleton_tracks"] = False
-    # A weak high-res detection may disappear for a few takes, so give the
-    # rescue tracker a slightly wider temporal bridge than the primary pass.
-    cfg["track_max_frame_gap"] = max(
-        int(primary.get("track_max_frame_gap", 4)),
-        int(primary.get("highres_rescue_track_max_frame_gap", 5)),
-    )
-    return result
-
-
-def _highres_rescue_tracks(
-    primary_tracks: list[PersonTrack],
-    rescue_frames: list[FrameAssessment],
-    config: dict,
-) -> tuple[list[PersonTrack], int, int]:
-    """Return repeated high-res faces that represent genuinely missing people.
-
-    The primary pass defines the group roster and geometry.  A second, more
-    sensitive detector pass is allowed to add a person only when a repeated
-    track survives all of these gates:
-      * it lies inside (or one normal grid step just outside) the stable group;
-      * its face size is compatible with nearby group members;
-      * it is not the same identity as an existing primary track;
-      * it is not sitting on an already occupied spatial slot.
-
-    This is intentionally stricter than v0.4.2 singleton promotion: one noisy
-    detection can never create a new person.
-    """
-    if not primary_tracks or not rescue_frames:
-        return [], 0, 0
-    cfg = config.get("group", {})
-    if not bool(cfg.get("highres_rescue_enabled", False)):
-        return [], 0, 0
-
-    rescue_config = _highres_rescue_tracking_config(config, len(rescue_frames))
-    highres_tracks, highres_diag = build_person_tracks(
-        rescue_frames, rescue_config, progress=None, log_roster=False
-    )
-    if not highres_tracks:
-        return [], highres_diag.max_faces_in_frame, highres_diag.tracks_built
-
-    primary_centers = [_track_median_center(t) for t in primary_tracks]
-    primary_sizes = [_track_median_size(t) for t in primary_tracks]
-    valid_sizes = [s for s in primary_sizes if s > 0.0]
-    if not primary_centers or not valid_sizes:
-        return [], highres_diag.max_faces_in_frame, highres_diag.tracks_built
-
-    xs = [c[0] for c in primary_centers]
-    ys = [c[1] for c in primary_centers]
-    xmin, xmax = min(xs), max(xs)
-    ymin, ymax = min(ys), max(ys)
-    nn = _median_nearest_neighbor_distance(primary_centers)
-    pad = max(
-        float(cfg.get("highres_rescue_min_roi_padding", 0.035)),
-        nn * float(cfg.get("highres_rescue_roi_neighbor_padding", 1.05)),
-    )
-    duplicate_slot_distance = max(
-        0.012,
-        min(
-            0.050,
-            nn * float(cfg.get("highres_rescue_duplicate_slot_factor", 0.32)),
-        ),
-    )
-    min_size_ratio = max(0.05, min(1.0, float(cfg.get("highres_rescue_min_size_ratio", 0.40))))
-    strong_identity_distance = max(0.05, min(0.45, float(cfg.get("highres_rescue_strong_identity_distance", 0.18))))
-    normal_identity_distance = max(strong_identity_distance, min(0.55, float(cfg.get("highres_rescue_identity_distance", 0.28))))
-    identity_position_gate = max(duplicate_slot_distance, min(0.20, float(cfg.get("highres_rescue_identity_position_gate", 0.10))))
-
-    accepted: list[PersonTrack] = []
-    log = logging.getLogger("photo_select_ai")
-    for candidate in highres_tracks:
-        cx, cy = _track_median_center(candidate)
-        csize = _track_median_size(candidate)
-        if not (xmin - pad <= cx <= xmax + pad and ymin - pad <= cy <= ymax + pad):
-            continue
-
-        # Compare size to the local neighbourhood rather than one global median;
-        # back-row children are naturally smaller than front-row children.
-        nearest_indices = sorted(
-            range(len(primary_tracks)),
-            key=lambda i: (cx - primary_centers[i][0]) ** 2 + (cy - primary_centers[i][1]) ** 2,
-        )[: min(3, len(primary_tracks))]
-        local_sizes = [primary_sizes[i] for i in nearest_indices if primary_sizes[i] > 0]
-        local_size = float(median(local_sizes)) if local_sizes else float(median(valid_sizes))
-        size_ratio = min(csize, local_size) / max(1e-9, max(csize, local_size))
-        if size_ratio < min_size_ratio:
-            continue
-
-        candidate_desc = candidate.centroid
-        duplicate = False
-        nearest_primary_distance = 999.0
-        for i, primary in enumerate(primary_tracks):
-            px, py = primary_centers[i]
-            pos_distance = ((cx - px) ** 2 + (cy - py) ** 2) ** 0.5
-            nearest_primary_distance = min(nearest_primary_distance, pos_distance)
-            if pos_distance <= duplicate_slot_distance:
-                duplicate = True
-                break
-            primary_desc = primary.centroid
-            if candidate_desc and primary_desc and len(candidate_desc) == len(primary_desc):
-                identity_distance = 1.0 - cosine_similarity(candidate_desc, primary_desc)
-                if identity_distance <= strong_identity_distance:
-                    duplicate = True
-                    break
-                if identity_distance <= normal_identity_distance and pos_distance <= identity_position_gate:
-                    duplicate = True
-                    break
-        if duplicate:
-            continue
-
-        accepted.append(candidate)
-        log.info(
-            "GROUP HIGHRES RESCUE ACCEPT | observations=%d | center=(%.4f,%.4f) | size=%.6f | nearest_slot=%.4f",
-            len(candidate.observations), cx, cy, csize, nearest_primary_distance,
-        )
-
-    return accepted, highres_diag.max_faces_in_frame, highres_diag.tracks_built
-
-
-def _combine_primary_and_rescue_tracks(
-    primary_tracks: list[PersonTrack],
-    rescue_tracks: list[PersonTrack],
-) -> list[PersonTrack]:
-    combined = list(primary_tracks) + list(rescue_tracks)
-    combined.sort(key=lambda t: (_track_median_center(t)[1], _track_median_center(t)[0], t.track_id))
-    for new_id, track in enumerate(combined, start=1):
-        track.track_id = new_id
-    return combined
-
 def _frame_track_matrix(frames: list[FrameAssessment], tracks: list[PersonTrack], config: dict) -> list[dict[int, float]]:
-    eye_threshold = float(config.get("analysis", {}).get("eye_open_threshold", 0.52))
+    eye_threshold = float(config.get("group", {}).get("eye_problem_threshold", 0.62))
     matrix: list[dict[int, float]] = [dict() for _ in frames]
     for track in tracks:
         for frame_idx, face in track.observations:
             if 0 <= frame_idx < len(frames):
                 matrix[frame_idx][track.track_id] = _face_quality(face, eye_threshold)
     return matrix
+
+
+def _portrait_preference_matrix(
+    frames: list[FrameAssessment],
+    tracks: list[PersonTrack],
+    config: dict,
+) -> list[dict[int, float]]:
+    """Build a child-relative portrait-preference matrix.
+
+    Public facial-beauty regressors can have person-specific calibration bias.
+    We therefore never compare one child's absolute score with another child's.
+    Every reliable score is centred/scaled against other takes of the same
+    PersonTrack. Tiny differences are damped so model noise is not exaggerated.
+    """
+    matrix: list[dict[int, float]] = [dict() for _ in frames]
+    cfg = config.get("group", {})
+    if not bool(cfg.get("portrait_preference_enabled", True)):
+        return matrix
+
+    min_span = max(0.01, min(0.50, float(cfg.get("portrait_preference_min_relative_span", 0.08))))
+    for track in tracks:
+        samples = [
+            (frame_idx, max(0.0, min(1.0, float(face.portrait_preference_score))))
+            for frame_idx, face in track.observations
+            if 0 <= frame_idx < len(frames) and face.portrait_preference_reliable
+        ]
+        if not samples:
+            continue
+        values = [value for _idx, value in samples]
+        if len(values) == 1:
+            matrix[samples[0][0]][track.track_id] = 0.50
+            continue
+
+        centre = float(median(values))
+        observed_span = max(values) - min(values)
+        span = max(min_span, observed_span)
+        for frame_idx, value in samples:
+            relative = 0.50 + (value - centre) / span
+            matrix[frame_idx][track.track_id] = max(0.0, min(1.0, relative))
+    return matrix
+
+
+def _portrait_preference_stats(
+    frame_idx: int,
+    track_ids: list[int],
+    portrait_matrix: list[dict[int, float]],
+    config: dict,
+) -> tuple[int, int, float, float, float]:
+    """Return known, preferred count, worst-tail, mean and aggregate score."""
+    cfg = config.get("group", {})
+    people = max(1, len(track_ids))
+    threshold = max(0.50, min(0.95, float(cfg.get("portrait_preference_top_threshold", 0.68))))
+    row = portrait_matrix[frame_idx] if 0 <= frame_idx < len(portrait_matrix) else {}
+    known_values = [row[tid] for tid in track_ids if tid in row]
+    known = len(known_values)
+    preferred = sum(1 for value in known_values if value >= threshold)
+
+    # Unknown is neutral, not bad. Missing people are handled by a harder gate.
+    effective = [row.get(tid, 0.50) for tid in track_ids]
+    mean_score = sum(effective) / people
+    worst_fraction = max(0.05, min(1.0, float(cfg.get("portrait_preference_worst_percentile", 0.25))))
+    worst_count = max(1, int(round(people * worst_fraction)))
+    worst_score = sum(sorted(effective)[:worst_count]) / worst_count
+    # `preferred` remains a separate primary ranking key. Keep the smooth
+    # aggregate centred at 0.5 for neutral data so it can safely be blended
+    # with the legacy frame score without introducing a constant hidden
+    # penalty. The lower tail deliberately matters more than the mean: one or
+    # two weak faces should not be washed out by several excellent ones.
+    aggregate = 0.60 * worst_score + 0.40 * mean_score
+    return known, preferred, worst_score, mean_score, aggregate
+
+
+def _group_preference_pool_usable(
+    pool_indices: list[int],
+    track_ids: list[int],
+    portrait_matrix: list[dict[int, float]],
+    config: dict,
+) -> bool:
+    """Decide FBP availability once for the whole best suitability tier.
+
+    A per-frame yes/no gate creates a mixed-FBP bias: a frame measured for just
+    over half the group can automatically outrank a frame measured for just
+    under half. Instead, FBP becomes active for the whole tier only when enough
+    children have repeated reliable measurements across that tier. Unknown
+    values then remain neutral (0.5) for every frame on the same scale.
+    """
+    cfg = config.get("group", {})
+    if not bool(cfg.get("portrait_preference_enabled", True)) or len(pool_indices) <= 1:
+        return False
+    if not track_ids:
+        return False
+    min_fraction = max(
+        0.0,
+        min(1.0, float(cfg.get("portrait_preference_min_known_fraction", 0.50))),
+    )
+    repeated_tracks = 0
+    for tid in track_ids:
+        observations = sum(
+            1
+            for frame_idx in pool_indices
+            if 0 <= frame_idx < len(portrait_matrix) and tid in portrait_matrix[frame_idx]
+        )
+        if observations >= 2:
+            repeated_tracks += 1
+    return repeated_tracks / max(1, len(track_ids)) >= min_fraction
 
 
 def _group_frame_score(
@@ -675,29 +529,6 @@ def _frame_track_faces(frames: list[FrameAssessment], tracks: list[PersonTrack])
     return matrix
 
 
-def _open_eye_stats(
-    frame_idx: int,
-    track_ids: list[int],
-    face_matrix: list[dict[int, FaceAssessment]],
-    config: dict,
-    eye_problem_limits: dict[int, float] | None = None,
-) -> tuple[int, int, int]:
-    """Return (open, closed, known) for reliable eye states in one group frame."""
-    global_threshold = float(config.get("group", {}).get("eye_problem_threshold", 0.62))
-    open_count = closed_count = known_count = 0
-    for tid in track_ids:
-        face = face_matrix[frame_idx].get(tid)
-        if face is None or not face.landmarks_reliable:
-            continue
-        known_count += 1
-        threshold = (eye_problem_limits or {}).get(tid, global_threshold)
-        if face.eyes_open_score >= threshold:
-            open_count += 1
-        else:
-            closed_count += 1
-    return open_count, closed_count, known_count
-
-
 def _eye_risk_stats(
     frame_idx: int,
     track_ids: list[int],
@@ -725,6 +556,107 @@ def _eye_risk_stats(
     return severe, closed, known, deficit
 
 
+def _group_pose_is_bad(face: FaceAssessment, config: dict) -> bool:
+    """Known excessive head turn is a hard Group-mode defect."""
+    cfg = config.get("group", {})
+    min_conf = max(0.0, min(1.0, float(cfg.get("head_pose_min_confidence", 0.30))))
+    if not face.landmarks_reliable or face.head_pose_confidence < min_conf:
+        return False
+    max_yaw = max(0.0, float(cfg.get("max_head_yaw_deg", 20.0)))
+    max_pitch = max(0.0, float(cfg.get("max_head_pitch_deg", 22.0)))
+    return abs(float(face.head_yaw_deg)) > max_yaw or abs(float(face.head_pitch_deg)) > max_pitch
+
+
+def _group_frame_defect_key(
+    frame_idx: int,
+    track_ids: list[int],
+    face_matrix: list[dict[int, FaceAssessment]],
+    frames: list[FrameAssessment],
+    config: dict,
+    eye_problem_limits: dict[int, float],
+) -> tuple[int, int, int, int, int, int, int, int, int, int]:
+    """Hard Group suitability plus a protected uncertain tier before FBP.
+
+    Missing faces, clearly closed eyes, excessive head turn, definite blur and
+    poor technical quality are hard defects. Borderline eyes/sharpness and
+    unreliable fine-state measurements are uncertainty instead of immediate
+    hard rejection. Thus a clean frame always outranks an uncertain one, but a
+    potentially good borderline frame remains available when every take is
+    difficult. FBP is evaluated only after this complete suitability tier.
+    """
+    cfg = config.get("group", {})
+    min_eye_sharp = max(0.0, min(1.0, float(cfg.get("eye_sharpness_problem_threshold", 0.42))))
+    eye_sharp_margin = max(0.0, min(0.25, float(cfg.get("eye_sharpness_uncertain_margin", 0.05))))
+    min_face_sharp = max(0.0, min(1.0, float(cfg.get("face_sharpness_problem_threshold", 0.34))))
+    face_sharp_margin = max(0.0, min(0.25, float(cfg.get("face_sharpness_uncertain_margin", 0.04))))
+    eye_uncertain_margin = max(0.0, min(0.25, float(cfg.get("eye_uncertain_margin", 0.06))))
+    min_face_technical = max(0.0, min(1.0, float(cfg.get("min_face_technical_quality", 0.30))))
+    min_frame_technical = max(0.0, min(1.0, float(cfg.get("min_frame_technical_quality", 0.28))))
+
+    missing = hard_closed = pose = hard_blur = poor_quality = 0
+    uncertain_eyes = uncertain_blur = unknown = 0
+    for tid in track_ids:
+        face = face_matrix[frame_idx].get(tid)
+        if face is None:
+            missing += 1
+            continue
+
+        min_pose_conf = max(0.0, min(1.0, float(cfg.get("head_pose_min_confidence", 0.30))))
+        if not face.landmarks_reliable:
+            unknown += 1
+        else:
+            if face.head_pose_confidence < min_pose_conf:
+                unknown += 1
+            eye_limit = eye_problem_limits.get(tid, float(cfg.get("eye_problem_threshold", 0.62)))
+            eyes = face.eyes_open_score
+            if eyes < eye_limit - eye_uncertain_margin:
+                hard_closed += 1
+            elif eyes < eye_limit:
+                uncertain_eyes += 1
+
+        blur_state = 0  # 0=clean, 1=uncertain, 2=definite blur
+        face_sharp = float(face.face_sharpness)
+        if face_sharp < min_face_sharp - face_sharp_margin:
+            blur_state = 2
+        elif face_sharp < min_face_sharp:
+            blur_state = 1
+
+        if face.landmarks_reliable:
+            eye_sharp = float(face.eye_sharpness)
+            if eye_sharp < min_eye_sharp - eye_sharp_margin:
+                blur_state = 2
+            elif eye_sharp < min_eye_sharp:
+                blur_state = max(blur_state, 1)
+
+        if blur_state == 2:
+            hard_blur += 1
+        elif blur_state == 1:
+            uncertain_blur += 1
+
+        if _group_pose_is_bad(face, config):
+            pose += 1
+        if face.technical < min_face_technical:
+            poor_quality += 1
+
+    if frames[frame_idx].technical < min_frame_technical:
+        poor_quality += 1
+
+    hard_total = missing + hard_closed + pose + hard_blur + poor_quality
+    uncertain_total = uncertain_eyes + uncertain_blur + unknown
+    return (
+        hard_total,
+        missing,
+        hard_closed,
+        pose,
+        hard_blur,
+        poor_quality,
+        uncertain_total,
+        uncertain_eyes,
+        uncertain_blur,
+        unknown,
+    )
+
+
 def _main_problem_for_track(
     track_id: int,
     best_idx: int,
@@ -748,11 +680,15 @@ def _main_problem_for_track(
         if face.eyes_open_score < eye_problem_threshold:
             return "eyes"
 
-    sharp_problem = float(cfg.get("eye_sharpness_problem_threshold", 0.42))
-    if face.landmarks_reliable and face.eye_sharpness < sharp_problem:
+    if _group_pose_is_bad(face, config):
+        return "pose"
+
+    eye_sharp_problem = float(cfg.get("eye_sharpness_problem_threshold", 0.42))
+    face_sharp_problem = float(cfg.get("face_sharpness_problem_threshold", 0.34))
+    if (face.landmarks_reliable and face.eye_sharpness < eye_sharp_problem) or face.face_sharpness < face_sharp_problem:
         return "sharpness"
 
-    if quality_matrix[best_idx].get(track_id, 0.0) < float(cfg.get("good_face_threshold", 0.62)):
+    if face.technical < float(cfg.get("min_face_technical_quality", 0.30)):
         return "quality"
     return None
 
@@ -813,6 +749,21 @@ def _candidate_resolves_problem(
         )
         return ok, 3.0 + max(0.0, cand_eyes - main_eyes) + 0.25 * cand_face.eye_sharpness if ok else 0.0
 
+    if problem == "pose":
+        if _group_pose_is_bad(cand_face, config):
+            return False, 0.0
+        min_pose_conf = float(cfg.get("head_pose_min_confidence", 0.30))
+        if not cand_face.landmarks_reliable or cand_face.head_pose_confidence < min_pose_conf:
+            return False, 0.0
+        eye_target = (eye_candidate_limits or {}).get(
+            track_id, float(cfg.get("eye_candidate_threshold", 0.68))
+        )
+        if cand_face.eyes_open_score < eye_target:
+            return False, 0.0
+        if cand_face.eye_sharpness < float(cfg.get("headswap_min_eye_sharpness", 0.35)):
+            return False, 0.0
+        return True, 2.3 + 0.25 * cand_q
+
     if problem == "sharpness":
         sharp_delta = float(cfg.get("eye_sharpness_improvement_margin", 0.10))
         main_sharp = main_face.eye_sharpness if main_face else 0.0
@@ -821,7 +772,7 @@ def _candidate_resolves_problem(
         ok = cand_face.eye_sharpness >= main_sharp + sharp_delta and eyes >= eye_floor
         return ok, 1.7 + max(0.0, cand_face.eye_sharpness - main_sharp) if ok else 0.0
 
-    quality_delta = float(cfg.get("quality_improvement_margin", cfg.get("improvement_margin", 0.12)))
+    quality_delta = float(cfg.get("quality_improvement_margin", 0.10))
     ok = cand_q >= max(min_candidate_q, main_q + quality_delta)
     return ok, 1.0 + max(0.0, cand_q - main_q) if ok else 0.0
 
@@ -833,11 +784,15 @@ def _base_main_rank_data(
     track_ids: list[int],
     matrix: list[dict[int, float]],
     face_matrix: list[dict[int, FaceAssessment]],
+    portrait_matrix: list[dict[int, float]],
     frame_scores: list[float],
+    frames: list[FrameAssessment],
     config: dict,
     eye_problem_limits: dict[int, float],
+    use_preference: bool,
 ) -> tuple[float, tuple]:
-    severe, closed_count, known_count, eye_deficit = _eye_risk_stats(
+    """Build RED rank with suitability first and one pool-level FBP mode."""
+    severe, _closed_count, known_count, eye_deficit = _eye_risk_stats(
         frame_idx, track_ids, face_matrix, config, eye_problem_limits
     )
     visible = len(matrix[frame_idx])
@@ -852,8 +807,33 @@ def _base_main_rank_data(
         - 0.28 * deficit_fraction
         - 0.08 * missing_fraction
     )
-    rank = (stable_score, -severe, -closed_count, visible, known_count, frame_scores[frame_idx])
-    return stable_score, rank
+
+    defect_key = _group_frame_defect_key(
+        frame_idx, track_ids, face_matrix, frames, config, eye_problem_limits
+    )
+    pref_known, preferred, pref_worst, pref_mean, pref_aggregate = _portrait_preference_stats(
+        frame_idx, track_ids, portrait_matrix, config
+    )
+    suitability_rank = tuple(-value for value in defect_key)
+
+    if use_preference:
+        priority_score = stable_score
+        # No per-frame FBP usable bit: every frame in the same suitability tier
+        # is compared on the same child-relative scale, with unknowns neutral.
+        preference_rank = (preferred, pref_worst, pref_mean, pref_aggregate)
+        rank = (
+            *suitability_rank,
+            *preference_rank,
+            stable_score,
+            visible,
+            known_count,
+            frame_scores[frame_idx],
+            pref_known,
+        )
+    else:
+        priority_score = stable_score
+        rank = (*suitability_rank, stable_score, visible, known_count, frame_scores[frame_idx])
+    return priority_score, rank
 
 
 def _track_expected_center(track: PersonTrack, frame_idx: int) -> tuple[float, float]:
@@ -937,6 +917,49 @@ def _camera_attention_stats(
     return len(values), away, mean, deficit
 
 
+def _camera_attention_guard(
+    frame_idx: int,
+    track_ids: list[int],
+    attention_matrix: dict[int, dict[int, FaceAssessment]],
+    config: dict,
+) -> tuple[int, int, int]:
+    """Return protected gaze tier, acceptable count and reliable count.
+
+    Tier 0 means that no reliably measured person is clearly looking away and
+    enough people are positively measured as looking approximately at the
+    camera. Tier 1 keeps a no-away frame available when eye detail is
+    insufficient. Further tiers increase with every confirmed away gaze.
+    """
+    cfg = config.get("group", {})
+    people = max(1, len(track_ids))
+    away_threshold = float(cfg.get("camera_attention_away_threshold", 0.42))
+    acceptable_threshold = float(cfg.get("camera_attention_acceptable_threshold", 0.52))
+    min_known_fraction = max(
+        0.0, min(1.0, float(cfg.get("camera_attention_min_known_fraction", 0.60)))
+    )
+    required = max(1, math.ceil(people * min_known_fraction))
+    reliable = acceptable = away = 0
+    faces = attention_matrix.get(frame_idx, {})
+    for tid in track_ids:
+        face = faces.get(tid)
+        if face is None or not face.camera_attention_reliable:
+            continue
+        reliable += 1
+        score = max(0.0, min(1.0, float(face.camera_attention_score)))
+        if score < away_threshold:
+            away += 1
+        elif score >= acceptable_threshold:
+            acceptable += 1
+
+    if away == 0 and acceptable >= required:
+        tier = 0
+    elif away == 0:
+        tier = 1
+    else:
+        tier = 1 + away
+    return tier, acceptable, reliable
+
+
 def _camera_attention_rank(
     frame_idx: int,
     base_score: float,
@@ -944,27 +967,63 @@ def _camera_attention_rank(
     track_ids: list[int],
     attention_matrix: dict[int, dict[int, FaceAssessment]],
     config: dict,
+    *,
+    use_preference: bool,
 ) -> tuple:
     cfg = config.get("group", {})
     people = max(1, len(track_ids))
     known, away, mean, deficit = _camera_attention_stats(
         frame_idx, track_ids, attention_matrix, config
     )
+    gaze_tier, acceptable, _reliable = _camera_attention_guard(
+        frame_idx, track_ids, attention_matrix, config
+    )
     # Unknown faces are neutral (0.5), never treated as looking away. This
     # prevents tiny/ambiguous eyes from incorrectly deciding the RED frame.
     effective_mean = (mean * known + 0.50 * (people - known)) / people
-    away_fraction = away / people
     deficit_fraction = deficit / people
     influence = float(cfg.get("camera_attention_influence", 0.12))
-    away_penalty = float(cfg.get("camera_attention_away_penalty", 0.45))
     deficit_weight = float(cfg.get("camera_attention_deficit_weight", 0.20))
     final_score = (
         base_score
         + influence * (effective_mean - 0.50)
-        - away_penalty * away_fraction
         - deficit_weight * deficit_fraction
     )
-    return (final_score, -away, effective_mean, known, *base_rank)
+
+    suitability_prefix = base_rank[:_GROUP_DEFECT_KEY_LEN]
+    remaining = base_rank[_GROUP_DEFECT_KEY_LEN:]
+    # Gaze is protected inside one technical-suitability tier. A confirmed
+    # away gaze can no longer be hidden by a tiny FBP advantage. Once the
+    # minimum gaze condition is satisfied, FBP remains the primary selector.
+    gaze_prefix = (-gaze_tier, -away)
+    if use_preference:
+        preference_prefix = remaining[:_GROUP_PREFERENCE_RANK_LEN]
+        trailing = remaining[_GROUP_PREFERENCE_RANK_LEN:]
+        gaze_score = (
+            influence * (effective_mean - 0.50)
+            - deficit_weight * deficit_fraction
+        )
+        return (
+            *suitability_prefix,
+            *gaze_prefix,
+            *preference_prefix,
+            acceptable,
+            known,
+            gaze_score,
+            effective_mean,
+            *trailing,
+            final_score,
+        )
+
+    return (
+        *suitability_prefix,
+        *gaze_prefix,
+        *remaining,
+        acceptable,
+        known,
+        effective_mean,
+        final_score,
+    )
 
 
 def select_group_series(
@@ -972,51 +1031,30 @@ def select_group_series(
     config: dict,
     progress: Callable[[float, str], None] | None = None,
     *,
-    rescue_frames: list[FrameAssessment] | None = None,
     attention_frames: dict[int, FrameAssessment] | None = None,
     diagnostic_log: bool = True,
 ) -> tuple[GroupSeriesSelection, GroupDiagnostics]:
-    # v0.4.3: the primary roster is stable-only. One-frame promotion from
-    # v0.4.2 is deliberately disabled because real validation showed it added
-    # false people (4a/3e/4d). Missing people are recovered only by the repeated
-    # high-resolution pass below.
-    primary_config = deepcopy(config)
-    primary_config.setdefault("group", {})["promote_singleton_tracks"] = False
     tracks, diag = build_person_tracks(
-        frames, primary_config, progress=progress, log_roster=False
+        frames, config, progress=progress, log_roster=False
     )
-    rescue_tracks: list[PersonTrack] = []
-    if rescue_frames is not None:
-        rescue_tracks, highres_max_faces, highres_tracks_built = _highres_rescue_tracks(
-            tracks, rescue_frames, config
-        )
-        diag.highres_rescue_tracks = len(rescue_tracks)
-        diag.highres_max_faces_in_frame = highres_max_faces
-        diag.highres_tracks_built = highres_tracks_built
-        if rescue_tracks:
-            tracks = _combine_primary_and_rescue_tracks(tracks, rescue_tracks)
-        diag.confirmed_tracks = len(tracks)
-        if progress:
-            progress(0.58, f"состав: устойчивых={diag.stable_tracks}; high-res восстановлено={len(rescue_tracks)}")
 
     log = logging.getLogger("photo_select_ai")
     if diagnostic_log:
         log.info(
-            "GROUP ROSTER | people=%d | stable=%d | rescued=%d | primary_max_faces_frame=%d | "
-            "highres_max_faces_frame=%d | primary_raw_tracks=%d | highres_raw_tracks=%d",
-            len(tracks), diag.stable_tracks, diag.highres_rescue_tracks, diag.max_faces_in_frame,
-            diag.highres_max_faces_in_frame, diag.tracks_built, diag.highres_tracks_built,
+            "GROUP ROSTER | people=%d | stable=%d | max_faces_frame=%d | raw_tracks=%d",
+            len(tracks), diag.stable_tracks, diag.max_faces_in_frame, diag.tracks_built,
         )
     cfg = config.get("group", {})
     min_people = max(2, int(cfg.get("min_people", 4)))
     if len(tracks) < min_people:
-        return GroupSeriesSelection(main=None, extras=[], track_count=len(tracks), rejected_reason="too_few_people"), diag
+        return GroupSeriesSelection(main=None, extras=[]), diag
 
     track_ids = [t.track_id for t in tracks]
     if progress:
         progress(0.62, "оценка лиц каждого ребёнка")
     matrix = _frame_track_matrix(frames, tracks, config)
     face_matrix = _frame_track_faces(frames, tracks)
+    portrait_matrix = _portrait_preference_matrix(frames, tracks, config)
     eye_problem_limits, eye_candidate_limits = _adaptive_eye_limits(tracks, config)
     frame_scores: list[float] = []
     total_frames = max(1, len(frames))
@@ -1028,36 +1066,86 @@ def select_group_series(
             progress(0.62 + 0.20 * (i + 1) / total_frames, f"оценка кадров {i + 1}/{len(frames)}")
     base_scores: dict[int, float] = {}
     base_ranks: dict[int, tuple] = {}
-    if bool(cfg.get("prioritize_open_eyes_main", True)):
-        # Eyes remain important, but do not use a brittle lexicographic
-        # open-eye counter.  A marginal landmark measurement should not beat a
-        # clearly sharper/better frame merely because it crossed one threshold.
-        for i in range(len(frames)):
-            base_scores[i], base_ranks[i] = _base_main_rank_data(
-                i, track_ids, matrix, face_matrix, frame_scores, config, eye_problem_limits
-            )
-    else:
-        for i in range(len(frames)):
-            base_scores[i] = frame_scores[i]
-            base_ranks[i] = (frame_scores[i],)
+
+    # Determine FBP mode once for the entire best suitability tier. This avoids
+    # the old mixed-FBP case where crossing a per-frame coverage threshold could
+    # outweigh the actual attractiveness result.
+    defect_keys = {
+        i: _group_frame_defect_key(
+            i, track_ids, face_matrix, frames, config, eye_problem_limits
+        )
+        for i in range(len(frames))
+    }
+    best_defect_key = min(defect_keys.values())
+    best_tier_indices = [i for i, key in defect_keys.items() if key == best_defect_key]
+    use_preference = _group_preference_pool_usable(
+        best_tier_indices, track_ids, portrait_matrix, config
+    )
+
+    for i in range(len(frames)):
+        base_scores[i], base_ranks[i] = _base_main_rank_data(
+            i,
+            track_ids,
+            matrix,
+            face_matrix,
+            portrait_matrix,
+            frame_scores,
+            frames,
+            config,
+            eye_problem_limits,
+            use_preference,
+        )
 
     base_order = sorted(range(len(frames)), key=lambda i: base_ranks[i], reverse=True)
-    shortlist_count = max(1, min(len(frames), int(cfg.get("camera_attention_shortlist", 3))))
-    diag.camera_attention_shortlist_indices = base_order[:shortlist_count]
+    shortlist_count = max(1, min(len(frames), int(cfg.get("camera_attention_shortlist", 5))))
+
+    # Gaze may only reorder frames in the best complete suitability tier. Start
+    # with the strongest FBP batch and ask the pipeline for another batch only
+    # when the measured frames contain no protected tier-0 candidate.
+    shortlist_order = [i for i in base_order if defect_keys[i] == best_defect_key]
+    diag.camera_attention_candidate_indices = list(shortlist_order)
+    requested_count = min(len(shortlist_order), shortlist_count)
+    if attention_frames:
+        analyzed = {i for i in shortlist_order if i in attention_frames}
+        # Never shrink the requested prefix after a later batch produces the
+        # first acceptable gaze.  Otherwise that successful frame can fall just
+        # beyond the original shortlist and be discarded before final ranking.
+        analyzed_positions = [
+            position for position, frame_idx in enumerate(shortlist_order)
+            if frame_idx in analyzed
+        ]
+        analyzed_prefix_count = max(analyzed_positions, default=-1) + 1
+        requested_count = max(requested_count, analyzed_prefix_count)
+        has_guarded_candidate = False
+        if analyzed:
+            provisional_matrix = _camera_attention_face_matrix(tracks, attention_frames, config)
+            has_guarded_candidate = any(
+                _camera_attention_guard(i, track_ids, provisional_matrix, config)[0] == 0
+                for i in analyzed
+            )
+        if not has_guarded_candidate:
+            requested_count = min(len(shortlist_order), requested_count + shortlist_count)
+
+    diag.camera_attention_shortlist_indices = shortlist_order[:requested_count]
     best_idx = base_order[0]
 
     attention_matrix: dict[int, dict[int, FaceAssessment]] = {}
     if bool(cfg.get("camera_attention_enabled", False)) and attention_frames:
         attention_matrix = _camera_attention_face_matrix(tracks, attention_frames, config)
-        # Camera attention is deliberately a final-stage comparison among the
-        # already strongest ordinary candidates. It cannot rescue a technically
-        # poor/blinking frame from far down the list.
+        # No reliable result means an exact fallback to the ordinary base rank.
+        # This is also the complete code path when the UI option is disabled.
         eligible = [i for i in diag.camera_attention_shortlist_indices if i in attention_frames]
         if eligible and any(_camera_attention_stats(i, track_ids, attention_matrix, config)[0] > 0 for i in eligible):
             best_idx = max(
                 eligible,
                 key=lambda i: _camera_attention_rank(
-                    i, base_scores[i], base_ranks[i], track_ids, attention_matrix, config
+                    i,
+                    base_scores[i],
+                    base_ranks[i],
+                    track_ids,
+                    attention_matrix,
+                    config,
+                    use_preference=use_preference,
                 ),
             )
             known, away, mean_attention, _deficit = _camera_attention_stats(
@@ -1079,18 +1167,39 @@ def select_group_series(
                 att_known, att_away, att_mean, _att_deficit = _camera_attention_stats(
                     i, track_ids, attention_matrix, config
                 )
-            log.info(
-                "GROUP FRAME %s | score=%.4f | visible=%d/%d | eyes_known=%d | "
-                "eyes_below=%d | severe_blinks=%d | eye_deficit=%.3f | "
-                "look_known=%d | look_away=%d | look_mean=%.3f",
-                frame.photo.path.name, frame_scores[i], visible, len(track_ids), known_count,
-                closed_count, severe, eye_deficit, att_known, att_away, att_mean,
+            pref_known, preferred, pref_worst, pref_mean, _pref_aggregate = _portrait_preference_stats(
+                i, track_ids, portrait_matrix, config
             )
+            defect_key = _group_frame_defect_key(
+                i, track_ids, face_matrix, frames, config, eye_problem_limits
+            )
+            log.info(
+                "GROUP FRAME %s | score=%.4f | suitability=%s | visible=%d/%d | eyes_known=%d | "
+                "eyes_below=%d | severe_blinks=%d | eye_deficit=%.3f | "
+                "portrait_known=%d | portrait_top=%d | portrait_worst=%.3f | portrait_mean=%.3f | "
+                "look_known=%d | look_away=%d | look_mean=%.3f",
+                frame.photo.path.name, frame_scores[i], defect_key, visible, len(track_ids), known_count,
+                closed_count, severe, eye_deficit, pref_known, preferred, pref_worst, pref_mean,
+                att_known, att_away, att_mean,
+            )
+        chosen_pref = _portrait_preference_stats(best_idx, track_ids, portrait_matrix, config)
+        diag.portrait_preference_known = chosen_pref[0]
+        diag.portrait_preferred_faces = chosen_pref[1]
+        diag.portrait_preference_worst = chosen_pref[2]
+        diag.portrait_preference_mean = chosen_pref[3]
         log.info(
-            "GROUP RED CHOSEN %s | tracks=%d | look_known=%d | look_away=%d | look_mean=%.3f",
-            frames[best_idx].photo.path.name, len(track_ids), diag.camera_attention_known,
-            diag.camera_attention_away, diag.camera_attention_mean,
+            "GROUP RED CHOSEN %s | tracks=%d | portrait_known=%d | portrait_top=%d | "
+            "portrait_worst=%.3f | portrait_mean=%.3f | look_known=%d | look_away=%d | look_mean=%.3f",
+            frames[best_idx].photo.path.name, len(track_ids), diag.portrait_preference_known,
+            diag.portrait_preferred_faces, diag.portrait_preference_worst, diag.portrait_preference_mean,
+            diag.camera_attention_known, diag.camera_attention_away, diag.camera_attention_mean,
         )
+
+    chosen_pref = _portrait_preference_stats(best_idx, track_ids, portrait_matrix, config)
+    diag.portrait_preference_known = chosen_pref[0]
+    diag.portrait_preferred_faces = chosen_pref[1]
+    diag.portrait_preference_worst = chosen_pref[2]
+    diag.portrait_preference_mean = chosen_pref[3]
 
     if progress:
         progress(0.84, "выбор главного RED-кадра")
@@ -1108,6 +1217,8 @@ def select_group_series(
                 diag.missing_problems += 1
             elif problem == "sharpness":
                 diag.sharpness_problems += 1
+            elif problem == "pose":
+                diag.pose_problems += 1
             else:
                 diag.quality_problems += 1
 
@@ -1117,8 +1228,10 @@ def select_group_series(
         score=frame_scores[best_idx],
         reason=(
             f"group_score={frame_scores[best_idx]:.3f}; people={len(tracks)}; "
+            f"portrait_top={diag.portrait_preferred_faces}/{diag.portrait_preference_known}; "
+            f"portrait_worst={diag.portrait_preference_worst:.3f}; portrait_mean={diag.portrait_preference_mean:.3f}; "
             f"problems={len(problems)}; eyes={diag.eye_problems}; missing={diag.missing_problems}; "
-            f"look_away={diag.camera_attention_away}/{diag.camera_attention_known}"
+            f"pose={diag.pose_problems}; look_away={diag.camera_attention_away}/{diag.camera_attention_known}"
         ),
     )
 
@@ -1162,7 +1275,6 @@ def select_group_series(
             if best_candidate_idx is None:
                 break
 
-            diag.candidate_extras += 1
             diag.covered_problems += len(best_cover)
             chosen_frames.add(best_candidate_idx)
             for tid in best_cover:
@@ -1180,46 +1292,52 @@ def select_group_series(
 
         diag.unresolved_problems = len(remaining)
 
-        # Always keep a practical reserve when requested. Targeted YELLOWs above
-        # fix concrete defects; backup YELLOWs below are simply strong alternate
-        # takes for manual retouching when strict defect rules found too little.
+        # Keep a practical reserve when requested, but never manufacture a
+        # generic backup from a worse suitability tier than RED. Targeted
+        # YELLOWs above are allowed to be imperfect elsewhere because they exist
+        # for a specific head swap; generic reserve YELLOWs must match RED's full
+        # suitability tier. Within that tier use the protected gaze rank for
+        # candidates that received the final high-resolution pass; otherwise
+        # fall back exactly to the ordinary RED rank.
         min_extra = max(0, min(max_extra, int(cfg.get("min_extra_candidates", 1))))
-        backup_score_ratio = max(0.0, min(1.0, float(cfg.get("backup_min_score_ratio", 0.86))))
-        person_margin = max(0.0, float(cfg.get("backup_person_improvement_margin", 0.05)))
+        red_suitability = defect_keys[best_idx]
         while len(extras) < min_extra:
-            best_backup_idx: int | None = None
-            best_backup_rank: tuple[float, float, float] | None = None
-            best_improved = 0
-            main_score = frame_scores[best_idx]
-            for idx in range(len(frames)):
-                if idx in chosen_frames:
-                    continue
-                improved = sum(
-                    1 for tid in track_ids
-                    if matrix[idx].get(tid, 0.0) >= matrix[best_idx].get(tid, 0.0) + person_margin
-                )
-                close_enough = main_score <= 1e-9 or frame_scores[idx] >= main_score * backup_score_ratio
-                if not close_enough and improved <= 0:
-                    continue
-                open_count, closed_count, _known = _open_eye_stats(
-                    idx, track_ids, face_matrix, config, eye_problem_limits
-                )
-                rank = (float(improved), float(open_count - closed_count), frame_scores[idx])
-                if best_backup_rank is None or rank > best_backup_rank:
-                    best_backup_rank = rank
-                    best_backup_idx = idx
-                    best_improved = improved
-            if best_backup_idx is None:
+            safe_candidates = [
+                idx for idx in range(len(frames))
+                if idx not in chosen_frames and defect_keys[idx] == red_suitability
+            ]
+            if not safe_candidates:
                 break
+            measured_safe = [
+                idx for idx in safe_candidates
+                if idx in attention_frames
+                and _camera_attention_stats(
+                    idx, track_ids, attention_matrix, config
+                )[0] > 0
+            ] if attention_matrix else []
+            if measured_safe:
+                best_backup_idx = max(
+                    measured_safe,
+                    key=lambda idx: _camera_attention_rank(
+                        idx,
+                        base_scores[idx],
+                        base_ranks[idx],
+                        track_ids,
+                        attention_matrix,
+                        config,
+                        use_preference=use_preference,
+                    ),
+                )
+            else:
+                best_backup_idx = max(safe_candidates, key=lambda idx: base_ranks[idx])
             chosen_frames.add(best_backup_idx)
-            diag.candidate_extras += 1
             diag.backup_extras += 1
             extras.append(
                 Selection(
                     photo=frames[best_backup_idx].photo,
                     label_role="yellow",
                     score=frame_scores[best_backup_idx],
-                    reason=f"backup; children_better={best_improved}; people={len(tracks)}",
+                    reason=f"backup; same_suitability_tier={red_suitability}; people={len(tracks)}",
                 )
             )
     else:
@@ -1227,7 +1345,7 @@ def select_group_series(
 
     if progress:
         progress(1.0, f"группа готова: RED + {len(extras)} YELLOW")
-    return GroupSeriesSelection(main=main, extras=extras, track_count=len(tracks)), diag
+    return GroupSeriesSelection(main=main, extras=extras), diag
 
 def has_group_face_count(frames: list[FrameAssessment], config: dict) -> bool:
     """Whether a block looks like a group, ignoring its current frame count.
@@ -1374,34 +1492,6 @@ def split_group_candidate_by_identity(
     groups.append(frames[start:])
     report(total_boundaries, f"границы готовы, найдено разделений={splits}")
     return [g for g in groups if g], splits
-
-def _frame_identity_overlap(left: FrameAssessment, right: FrameAssessment, max_distance: float) -> float:
-    """Fraction of faces in the smaller frame that can be identity-matched."""
-    lfaces = [f for f in left.faces if f.descriptor]
-    rfaces = [f for f in right.faces if f.descriptor]
-    if not lfaces or not rfaces:
-        return 0.0
-    pairs: list[tuple[float, int, int]] = []
-    for li, lf in enumerate(lfaces):
-        for ri, rf in enumerate(rfaces):
-            sim = cosine_similarity(lf.descriptor, rf.descriptor)
-            dist = 1.0 - sim
-            # Position is only a tie-breaker. Children can shift slightly
-            # between takes, but usually keep roughly the same place.
-            pos = _position_similarity(lf, rf)
-            score = sim + 0.05 * pos
-            if dist <= max_distance:
-                pairs.append((score, li, ri))
-    pairs.sort(reverse=True)
-    used_l: set[int] = set()
-    used_r: set[int] = set()
-    matched = 0
-    for _score, li, ri in pairs:
-        if li in used_l or ri in used_r:
-            continue
-        used_l.add(li); used_r.add(ri); matched += 1
-    return matched / max(1, min(len(lfaces), len(rfaces)))
-
 
 
 def _sequence_source(frame: FrameAssessment) -> tuple[str, str]:

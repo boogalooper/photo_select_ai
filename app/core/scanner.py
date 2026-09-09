@@ -16,8 +16,11 @@ from app.paths import ROOT
 from .models import PhotoFile
 from .preview import RAW_EXTENSIONS
 
-_DIGITS = re.compile(r"(\d+)(?!.*\d)")
-_TRAILING_DIGITS = re.compile(r"(\d+)$")
+_NUMBER_RUN = re.compile(r"\d+")
+_CAMERA_INDEX_PREFIX = re.compile(
+    r"(?:^|[^a-z0-9])(?:img|dsc|dscf|pict|pxl|photo|image)[_\- ]*$",
+    re.IGNORECASE,
+)
 _DATE_FORMATS = ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S")
 _CACHE_VERSION = 1
 _DEFAULT_CACHE_PATH = ROOT / "runtime" / "cache" / "capture_times.json"
@@ -65,17 +68,57 @@ class _IgnoreUnsupportedExifContainer(logging.Filter):
 logging.getLogger("exifread").addFilter(_IgnoreUnsupportedExifContainer())
 
 
+def _sequence_index_match(path: Path) -> re.Match[str] | None:
+    """Choose the likely camera/export frame counter inside a filename.
+
+    Long camera counters take priority over short edit-version suffixes. Among
+    equally plausible counters the rightmost one wins, while a counter after a
+    conventional camera prefix gets the strongest priority.
+    """
+    matches = list(_NUMBER_RUN.finditer(path.stem))
+    if not matches:
+        return None
+
+    def priority(match: re.Match[str]) -> tuple[int, int, int]:
+        digits = match.group(0)
+        prefix = path.stem[:match.start()]
+        camera_prefixed = bool(_CAMERA_INDEX_PREFIX.search(prefix))
+        counter_sized = 3 <= len(digits) <= 6
+        plausible_year = len(digits) == 4 and 1900 <= int(digits) <= 2199
+        # An eight-digit run is commonly a YYYYMMDD date and should not beat a
+        # normal 3-6 digit frame counter later in the name.
+        plausible_date = len(digits) == 8 and 1900 <= int(digits[:4]) <= 2199
+        calendar_like = plausible_year or plausible_date
+        # Calendar-looking runs stay demoted even after prefixes such as PXL or
+        # IMG.  Phones commonly produce PXL_YYYYMMDD_HHMMSS; treating the date
+        # as the frame index would give every shot from that day the same index.
+        if calendar_like:
+            score = 0
+        elif camera_prefixed and counter_sized:
+            score = 4
+        elif camera_prefixed:
+            score = 3
+        elif counter_sized:
+            score = 2
+        else:
+            score = 1
+        return score, match.start(), len(digits)
+
+    return max(matches, key=priority)
+
+
 def _sequence_number(path: Path) -> int | None:
-    match = _DIGITS.search(path.stem)
-    return int(match.group(1)) if match else None
+    match = _sequence_index_match(path)
+    return int(match.group(0)) if match else None
 
 
 def _sequence_source(path: Path) -> tuple[str, str]:
-    # Sequence counters are comparable only when the stem actually ends in
-    # digits.  Names such as IMG_0001_edit must not share the IMG_ source of
-    # camera-native IMG_0002 files merely because they contain a number.
-    match = _TRAILING_DIGITS.search(path.stem)
-    prefix = path.stem[: match.start()] if match else path.stem
+    # The edit/export suffix after a confidently selected frame counter is not
+    # part of the physical sequence identity. Thus IMG_0001_edit and
+    # IMG_0002_final remain consecutive frames from the same source.
+    match = _sequence_index_match(path)
+    prefix = path.stem[:match.start()] if match else path.stem
+    prefix = re.sub(r"[_\- .]+$", "", prefix) or "__numeric__"
     try:
         parent = str(path.parent.resolve(strict=False)).casefold()
     except OSError:
@@ -125,17 +168,6 @@ def _read_exif_capture_time(path: Path) -> datetime | None:
     return None
 
 
-def read_capture_time(path: Path) -> datetime:
-    """Compatibility helper: EXIF first, then filesystem modification time."""
-    try:
-        dt = _read_exif_capture_time(path)
-        if dt is not None:
-            return dt
-    except Exception:
-        pass
-    return datetime.fromtimestamp(path.stat().st_mtime)
-
-
 def count_supported_photos(folder: Path, extensions: Iterable[str], recursive: bool = True) -> int:
     """Count supported files quickly for GUI validation; does not parse EXIF."""
     if not folder.is_dir():
@@ -160,32 +192,6 @@ def count_supported_photos(folder: Path, extensions: Iterable[str], recursive: b
         return count
     except OSError:
         return 0
-
-
-def has_supported_photos(folder: Path, extensions: Iterable[str], recursive: bool = True) -> bool:
-    """Fast existence check for the GUI; does not parse EXIF."""
-    if not folder.is_dir():
-        return False
-    extset = {e.lower() for e in extensions}
-    if recursive:
-        try:
-            for _root, _dirs, files in os.walk(folder):
-                if any(Path(name).suffix.lower() in extset for name in files):
-                    return True
-        except OSError:
-            return False
-        return False
-    try:
-        with os.scandir(folder) as entries:
-            for entry in entries:
-                try:
-                    if entry.is_file() and Path(entry.name).suffix.lower() in extset:
-                        return True
-                except OSError:
-                    continue
-        return False
-    except OSError:
-        return False
 
 
 def _discover_paths(folder: Path, extset: set[str], recursive: bool) -> list[Path]:

@@ -12,6 +12,7 @@ import numpy as np
 from app.core.models import FaceAssessment, FrameAssessment, PhotoFile
 from app.utils.cuda_runtime import cuda_runtime_versions, prepare_windows_cuda_dlls
 from .quality import clamp01, sharpness_score, technical_quality
+from .portrait_preference import PortraitPreferenceScorer
 
 # InsightFace 2d106det layout used by the official model pack.
 # See InsightFace-compatible consumers: right eye 33:43, mouth 52:72,
@@ -22,7 +23,7 @@ _LEFT_EYE_106 = slice(87, 97)
 
 
 class InsightFaceAnalyzer:
-    """Portrait-only InsightFace analyzer.
+    """InsightFace analyzer for portrait and group workflows.
 
     Full-frame face detection, identity embeddings and 106-point landmarks all
     come from the InsightFace buffalo_l pack.  Eye openness, smile proxy,
@@ -51,7 +52,27 @@ class InsightFaceAnalyzer:
         self.det_size = _round_det_size(int(config["analysis"].get(det_key, 1024 if self.mode == "group" else 640)))
         det_thresh_key = "insightface_det_thresh_group" if self.mode == "group" else "insightface_det_thresh"
         self.det_thresh = float(config["analysis"].get(det_thresh_key, config["analysis"].get("insightface_det_thresh", 0.25)))
-        self.max_faces = int(config["analysis"].get(faces_key, 64 if self.mode == "group" else 6))
+        self.max_faces = int(config["analysis"].get(faces_key, 80 if self.mode == "group" else 6))
+        self.portrait_preference = None
+        preference_section = self.mode if self.mode in {"portrait", "group"} else "group"
+        if bool(config.get(preference_section, {}).get("portrait_preference_enabled", self.mode == "group")):
+            # FBP is an optional ranking enhancement at runtime. install.bat
+            # still installs and validates it, but a later missing/corrupt model
+            # must never block the core portrait/group workflow.
+            preference_root = self.model_root.parent / "portrait_preference"
+            try:
+                self.portrait_preference = PortraitPreferenceScorer(
+                    preference_root, config, section=preference_section
+                )
+            except Exception as exc:
+                self.portrait_preference = None
+                self.log.warning(
+                    "Portrait preference model unavailable; using legacy ranking fallback: %s", exc
+                )
+                self.message(
+                    "Facial Beauty Prediction недоступен — используется резервный рейтинг качества. "
+                    "Основной анализ продолжен; при необходимости запустите install.bat для восстановления модели."
+                )
         self._cpu_fallback_allowed = bool(config["analysis"].get("insightface_cuda_fallback_cpu", True))
         self._cpu_fallback_used = False
         self._requested_provider = str(config["analysis"].get("insightface_provider", "auto")).lower()
@@ -202,7 +223,8 @@ class InsightFaceAnalyzer:
         if isinstance(first, tuple):
             first = first[0]
         suffix = " → CPU fallback" if self._cpu_fallback_used else ""
-        return f"InsightFace/SCRFD+106 ({first}){suffix}"
+        preference = " + FBP-ResNet18" if self.portrait_preference is not None else ""
+        return f"InsightFace/SCRFD+106 ({first}){suffix}{preference}"
 
     def _release_app(self) -> None:
         """Drop all known references to InsightFace/ORT sessions.
@@ -288,7 +310,15 @@ class InsightFaceAnalyzer:
         except TypeError:  # API compatibility
             detected = self.app.get(bgr)
 
-        min_fraction = float(self.config["analysis"].get("face_min_fraction", 0.0005))
+        if self.mode == "group":
+            min_fraction = float(
+                self.config.get("group", {}).get(
+                    "min_track_face_fraction",
+                    self.config["analysis"].get("face_min_fraction", 0.0005),
+                )
+            )
+        else:
+            min_fraction = float(self.config["analysis"].get("face_min_fraction", 0.0005))
         faces: list[FaceAssessment] = []
 
         for detected_face in detected or []:
@@ -313,6 +343,15 @@ class InsightFaceAnalyzer:
             face_sharp = sharpness_score(face_rgb)
             tech = technical_quality(face_rgb)
             det_score = float(getattr(detected_face, "det_score", 1.0) or 0.0)
+            if self.portrait_preference is not None:
+                # The scorer has already passed a startup forward-pass probe.
+                # If a later inference nevertheless fails, propagate it rather
+                # than mixing FBP and fallback rankings inside one shoot.
+                pref_score, pref_raw, pref_reliable = self.portrait_preference.score(
+                    rgb, (x1, y1, x2, y2)
+                )
+            else:
+                pref_score, pref_raw, pref_reliable = 0.50, 0.0, False
 
             landmarks = _landmarks_106(detected_face)
             landmarks_ok = landmarks is not None and _fine_state_landmarks_reliable(
@@ -322,16 +361,16 @@ class InsightFaceAnalyzer:
                 eye_left, eye_right, eye_sharp = _eye_metrics(rgb, landmarks, self.config)
                 smile, expression = _mouth_expression_metrics(landmarks, (x1, y1, x2, y2))
                 reliable = True
-                if self.mode == "portrait":
-                    head_frontal, head_pose_conf, head_yaw, head_pitch = _head_pose_metrics(
-                        landmarks, rgb.shape, self.config
-                    )
-                else:
-                    head_pose_conf, head_yaw, head_pitch = 0.0, 0.0, 0.0
-                    head_frontal = 0.50
+                # Head pose is a first-class suitability signal in Group mode
+                # and a pose-description cue in Portrait mode. Estimate it for
+                # both modes from the already available 106 landmarks.
+                head_frontal, head_pose_conf, head_yaw, head_pitch = _head_pose_metrics(
+                    landmarks, rgb.shape, self.config
+                )
                 if self.mode == "group" and bool(self.config.get("group", {}).get("camera_attention_enabled", False)):
                     attention, attention_conf, head_frontal = _camera_attention_metrics(
-                        rgb, landmarks, (x1, y1, x2, y2), eye_left, eye_right, self.config
+                        rgb, landmarks, (x1, y1, x2, y2), eye_left, eye_right, self.config,
+                        head_score=head_frontal, head_conf=head_pose_conf,
                     )
                     attention_reliable = attention_conf >= float(
                         self.config.get("group", {}).get("camera_attention_min_confidence", 0.38)
@@ -371,13 +410,14 @@ class InsightFaceAnalyzer:
                     eye_sharpness=eye_sharp,
                     technical=tech,
                     quality=quality,
+                    portrait_preference_score=pref_score,
+                    portrait_preference_raw=pref_raw,
+                    portrait_preference_reliable=pref_reliable,
                     descriptor=descriptor,
                     landmarks_reliable=reliable,
                     detection_confidence=det_score,
                     descriptor_source="insightface",
                     camera_attention_score=attention,
-                    camera_attention_confidence=attention_conf,
-                    head_frontal_score=head_frontal,
                     camera_attention_reliable=attention_reliable,
                     head_yaw_deg=head_yaw,
                     head_pitch_deg=head_pitch,
@@ -685,6 +725,9 @@ def _camera_attention_metrics(
     eye_left_open: float,
     eye_right_open: float,
     config: dict,
+    *,
+    head_score: float | None = None,
+    head_conf: float | None = None,
 ) -> tuple[float, float, float]:
     """Soft estimate that a group subject is looking toward the camera.
 
@@ -695,7 +738,8 @@ def _camera_attention_metrics(
     cfg = config.get("group", {})
     min_eye_px = float(cfg.get("camera_attention_min_eye_px", 14.0))
     min_open = float(cfg.get("camera_attention_min_eye_open", 0.38))
-    head_score, head_conf = _head_frontal_metrics(landmarks, rgb.shape, config)
+    if head_score is None or head_conf is None:
+        head_score, head_conf = _head_frontal_metrics(landmarks, rgb.shape, config)
 
     eye_results: list[tuple[float, float, float]] = []
     if eye_right_open >= min_open:

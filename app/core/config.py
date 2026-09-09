@@ -8,6 +8,15 @@ from typing import Any
 from app.paths import ROOT
 DEFAULT_CONFIG_PATH = ROOT / "config" / "default.json"
 UI_STATE_PATH = ROOT / "config" / "ui_state.json"
+UI_STATE_VERSION = 20
+
+# Values that are safe to preserve when an unknown/very old UI-state schema is
+# encountered. Algorithm thresholds intentionally reset to current defaults.
+_STABLE_UI_STATE_KEYS = {
+    "folder", "mode", "scheme", "custom_red", "custom_yellow",
+    "advanced_visible", "insightface_provider", "cuda_conv_algo",
+    "cuda_fallback", "cpu_workers",
+}
 
 
 def load_config(path: Path | None = None) -> dict[str, Any]:
@@ -22,7 +31,29 @@ def load_ui_state() -> dict[str, Any]:
     try:
         with UI_STATE_PATH.open("r", encoding="utf-8") as fh:
             value = json.load(fh)
-        return value if isinstance(value, dict) else {}
+        if not isinstance(value, dict):
+            return {}
+
+        try:
+            version = int(value.get("state_version", 0))
+        except (TypeError, ValueError):
+            version = 0
+
+        if version == UI_STATE_VERSION:
+            return value
+        if version in {18, 19}:
+            # The immediately preceding UI schema uses compatible controls. Mark
+            # the schema migrated so later versions can make explicit choices.
+            migrated = dict(value)
+            migrated["state_version"] = UI_STATE_VERSION
+            return migrated
+
+        # Very old or future state: keep only durable UI/environment choices.
+        # Selection thresholds return to the current release defaults instead
+        # of silently overriding newly recommended values.
+        migrated = {k: value[k] for k in _STABLE_UI_STATE_KEYS if k in value}
+        migrated["state_version"] = UI_STATE_VERSION
+        return migrated
     except Exception:
         return {}
 

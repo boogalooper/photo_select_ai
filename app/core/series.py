@@ -45,19 +45,9 @@ def build_candidate_series(photos: list[PhotoFile], config: dict) -> list[PhotoS
     return [PhotoSeries(index=i + 1, photos=g) for i, g in enumerate(groups)]
 
 
-def refine_assessments(frames: list[FrameAssessment], config: dict) -> list[list[FrameAssessment]]:
-    return refine_assessments_detailed(frames, config).groups
-
 
 def _same_person_threshold(config: dict) -> float:
-    series = config["series"]
-    if "portrait_same_person_similarity" in series:
-        return max(0.0, min(1.0, float(series["portrait_same_person_similarity"])))
-    # Compatibility with v0.1.5 configs.
-    if "portrait_change_sensitivity" in series:
-        sensitivity = max(0.0, min(100.0, float(series["portrait_change_sensitivity"])))
-        return 0.28 + 0.0031 * sensitivity
-    return 0.42
+    return max(0.0, min(1.0, float(config.get("series", {}).get("portrait_same_person_similarity", 0.42))))
 
 
 def _descriptor_similarity(a: FaceAssessment | None, b: FaceAssessment | None) -> float | None:
@@ -296,10 +286,6 @@ def refine_assessments_detailed(frames: list[FrameAssessment], config: dict) -> 
     return result
 
 
-def _refine_portrait_dbscan(frames: list[FrameAssessment], config: dict) -> list[list[FrameAssessment]]:
-    """Compatibility wrapper used by older tests/imports."""
-    return _refine_portrait_dbscan_v3(frames, config).groups
-
 
 def _frame_descriptor(frame: FrameAssessment) -> list[float]:
     return _portrait_descriptor(frame)
@@ -336,7 +322,7 @@ def _segment_distance(left: list[FrameAssessment], right: list[FrameAssessment])
 def _refine_portrait_dbscan_v3(frames: list[FrameAssessment], config: dict) -> RefineResult:
     """Portrait identity clustering with temporal hysteresis.
 
-    v0.2.5 deliberately separates *detection recall* from *series evidence*:
+    Detection recall is deliberately separated from *series evidence*:
     SCRFD may run with a low threshold so difficult child faces are not lost,
     but a brand-new series is accepted only after several sufficiently strong
     face detections.  Isolated false positives on walls/floors therefore do not
@@ -457,11 +443,26 @@ def _refine_portrait_dbscan_v3(frames: list[FrameAssessment], config: dict) -> R
         if prev_label is not None and prev_label == next_label:
             frame_labels[idx] = prev_label
 
-    # Remove an isolated identity glitch A/B/A.  Two-frame and larger fragments
-    # are handled by centroid-based adjacent merging below.
-    for idx in range(1, len(frame_labels) - 1):
-        if frame_labels[idx - 1] == frame_labels[idx + 1] != frame_labels[idx]:
-            frame_labels[idx] = frame_labels[idx - 1]
+    # Resolve an isolated A/B/A identity glitch only when single-frame portrait
+    # series are *not* explicitly allowed. DBSCAN is intentionally stricter than
+    # the sequential same-person threshold, so a strong profile view of child A
+    # can occasionally receive its own one-frame label. Keep such a moderate
+    # same-person view inside A, but drop a clearly different one-frame identity
+    # instead of relabelling that wrong face as A (where it could compete for RED).
+    if min_confirmed > 1:
+        same_person_threshold = _same_person_threshold(config)
+        for idx in range(1, len(frame_labels) - 1):
+            if frame_labels[idx - 1] == frame_labels[idx + 1] != frame_labels[idx]:
+                face = _frame_face(frames[idx])
+                neighbour_faces = (_frame_face(frames[idx - 1]), _frame_face(frames[idx + 1]))
+                similarities = [
+                    value for value in (_descriptor_similarity(face, ref) for ref in neighbour_faces)
+                    if value is not None
+                ]
+                if similarities and max(similarities) >= same_person_threshold:
+                    frame_labels[idx] = frame_labels[idx - 1]
+                else:
+                    frame_labels[idx] = None
 
     # Build labelled chronological segments. None-only gaps are intentionally
     # omitted: they are not portrait series and therefore can never be selected.
@@ -836,7 +837,7 @@ def link_repeated_portrait_series(
 
     portrait_cfg = config.get("portrait", {})
     mode = str(portrait_cfg.get("repeat_pose_mode", "off")).lower()
-    if mode not in {"red_yellow", "first_red_rest_yellow", "best_red_pose_yellow"}:
+    if mode != "best_red_pose_yellow":
         return PortraitRepeatLinkResult(list(range(len(groups))))
 
     max_series_gap = max(1, int(portrait_cfg.get("repeat_pose_max_series_gap", 3)))

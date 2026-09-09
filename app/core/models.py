@@ -31,6 +31,13 @@ class FaceAssessment:
     eye_sharpness: float
     technical: float
     quality: float
+    # Generic portrait-preference prior. The initial backend is a public
+    # facial-beauty regressor, but group selection normalizes it within each
+    # PersonTrack so absolute scores of different people are never compared.
+    # These fields are backend-agnostic for a future personalised ranker.
+    portrait_preference_score: float = 0.50
+    portrait_preference_raw: float = 0.0
+    portrait_preference_reliable: bool = False
     descriptor: list[float] = field(default_factory=list)
     landmarks_reliable: bool = True
     detection_confidence: float = 1.0
@@ -38,8 +45,6 @@ class FaceAssessment:
     # Experimental group-camera attention metrics.  They are deliberately
     # optional/neutral so older tests and portrait logic remain unchanged.
     camera_attention_score: float = 0.50
-    camera_attention_confidence: float = 0.0
-    head_frontal_score: float = 0.50
     camera_attention_reliable: bool = False
     # Generic head pose estimated from the same 106 landmarks.  Portrait
     # repeat-pose selection uses this only as a conservative cue that two
@@ -90,6 +95,8 @@ class Selection:
     label_role: str  # red for main selection; yellow for group backups or distinct portrait poses
     score: float
     reason: str
+    preference_score: Optional[float] = None
+    legacy_score: Optional[float] = None
 
 
 @dataclass(slots=True)
@@ -116,6 +123,7 @@ class RunStats:
     group_missing_problems: int = 0
     group_sharpness_problems: int = 0
     group_quality_problems: int = 0
+    group_pose_problems: int = 0
     group_camera_attention_known: int = 0
     group_camera_attention_away: int = 0
     group_camera_attention_series: int = 0
@@ -128,7 +136,6 @@ class RunStats:
     sidecar_xmp_written: int = 0
     skipped_short_series: int = 0
     frames_without_faces: int = 0
-    read_errors: int = 0
     analysis_errors: int = 0
     series_without_selection: int = 0
     weak_series_rejected: int = 0
@@ -150,11 +157,3 @@ class RunStats:
     raw_jpeg_pairs_collapsed: int = 0
     metadata_errors: int = 0
 
-    @property
-    def total_selected(self) -> int:
-        return (
-            self.portrait_selected
-            + self.portrait_repeat_yellow_selected
-            + self.group_main_selected
-            + self.group_extra_selected
-        )

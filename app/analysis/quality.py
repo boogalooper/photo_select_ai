@@ -30,15 +30,3 @@ def sharpness_score(rgb: np.ndarray) -> float:
     # Soft saturation; robust across resized previews.
     return clamp01(variance / (variance + 180.0))
 
-
-def appearance_descriptor(rgb: np.ndarray) -> list[float]:
-    if rgb.size == 0:
-        return []
-    small = cv2.resize(rgb, (32, 32), interpolation=cv2.INTER_AREA)
-    hsv = cv2.cvtColor(small, cv2.COLOR_RGB2HSV)
-    hist = cv2.calcHist([hsv], [0, 1], None, [8, 4], [0, 180, 0, 256]).flatten()
-    hist = hist / (np.linalg.norm(hist) + 1e-8)
-    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-    dct = cv2.dct(gray)[:4, :4].flatten()
-    dct = dct / (np.linalg.norm(dct) + 1e-8)
-    return np.concatenate([hist, dct]).astype(float).tolist()
