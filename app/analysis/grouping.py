@@ -1239,7 +1239,9 @@ def select_group_series(
     if bool(cfg.get("find_headswap_candidates", True)):
         max_extra = max(0, min(5, int(cfg.get("max_extra_candidates", 3))))
         remaining = dict(problems)
-        chosen_frames = {best_idx}
+        # Match the final metadata plan's resource identity, including case.
+        resource_keys = [str(frame.photo.path.with_suffix("")).casefold() for frame in frames]
+        chosen_resources = {resource_keys[best_idx]}
 
         while remaining and len(extras) < max_extra:
             if progress:
@@ -1250,7 +1252,7 @@ def select_group_series(
             best_types: dict[str, int] = {}
 
             for idx in range(len(frames)):
-                if idx in chosen_frames:
+                if resource_keys[idx] in chosen_resources:
                     continue
                 cover: set[int] = set()
                 utility = 0.0
@@ -1276,7 +1278,7 @@ def select_group_series(
                 break
 
             diag.covered_problems += len(best_cover)
-            chosen_frames.add(best_candidate_idx)
+            chosen_resources.add(resource_keys[best_candidate_idx])
             for tid in best_cover:
                 remaining.pop(tid, None)
 
@@ -1302,12 +1304,12 @@ def select_group_series(
         while len(extras) < min_extra:
             backup_candidates = [
                 idx for idx in range(len(frames))
-                if idx not in chosen_frames and defect_keys[idx] == red_suitability
+                if resource_keys[idx] not in chosen_resources and defect_keys[idx] == red_suitability
             ]
             forced_degraded = False
             if not backup_candidates:
                 remaining_candidates = [
-                    idx for idx in range(len(frames)) if idx not in chosen_frames
+                    idx for idx in range(len(frames)) if resource_keys[idx] not in chosen_resources
                 ]
                 if not remaining_candidates:
                     break
@@ -1317,6 +1319,18 @@ def select_group_series(
                     if defect_keys[idx] == next_suitability
                 ]
                 forced_degraded = True
+            # Decide FBP on the actual remaining reserve pool, not on RED's
+            # pool (which may contain only one technically clean frame).
+            backup_preference = _group_preference_pool_usable(
+                backup_candidates, track_ids, portrait_matrix, config
+            )
+            backup_ranks = {
+                idx: _base_main_rank_data(
+                    idx, track_ids, matrix, face_matrix, portrait_matrix,
+                    frame_scores, frames, config, eye_problem_limits,
+                    backup_preference,
+                ) for idx in backup_candidates
+            }
             measured_safe = [
                 idx for idx in backup_candidates
                 if idx in attention_frames
@@ -1329,17 +1343,17 @@ def select_group_series(
                     measured_safe,
                     key=lambda idx: _camera_attention_rank(
                         idx,
-                        base_scores[idx],
-                        base_ranks[idx],
+                        backup_ranks[idx][0],
+                        backup_ranks[idx][1],
                         track_ids,
                         attention_matrix,
                         config,
-                        use_preference=use_preference,
+                        use_preference=backup_preference,
                     ),
                 )
             else:
-                best_backup_idx = max(backup_candidates, key=lambda idx: base_ranks[idx])
-            chosen_frames.add(best_backup_idx)
+                best_backup_idx = max(backup_candidates, key=lambda idx: backup_ranks[idx][1])
+            chosen_resources.add(resource_keys[best_backup_idx])
             diag.backup_extras += 1
             backup_kind = "forced_backup" if forced_degraded else "backup"
             extras.append(

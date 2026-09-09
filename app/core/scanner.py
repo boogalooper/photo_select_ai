@@ -88,7 +88,7 @@ def _sequence_index_match(path: Path) -> re.Match[str] | None:
         # An eight-digit run is commonly a YYYYMMDD date and should not beat a
         # normal 3-6 digit frame counter later in the name.
         plausible_date = len(digits) == 8 and 1900 <= int(digits[:4]) <= 2199
-        calendar_like = plausible_year or plausible_date
+        calendar_like = plausible_date or (plausible_year and not camera_prefixed)
         # Calendar-looking runs stay demoted even after prefixes such as PXL or
         # IMG.  Phones commonly produce PXL_YYYYMMDD_HHMMSS; treating the date
         # as the frame index would give every shot from that day the same index.

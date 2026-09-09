@@ -23,6 +23,12 @@ def attention_face(score: float, reliable: bool = True):
 
 
 class FilenameSequenceTests(unittest.TestCase):
+    def test_camera_counters_that_resemble_years(self):
+        for index in (1899, 1900, 2026, 2199, 2200):
+            with self.subTest(index=index):
+                path = Path(f"IMG_{index}_v2.jpg")
+                self.assertEqual(_sequence_number(path), index)
+                self.assertEqual(_sequence_source(path)[1], "img")
     def test_edit_suffix_does_not_split_camera_sequence(self):
         first = Path("shoot/IMG_0001_edit.jpg")
         second = Path("shoot/IMG_0002_final.jpg")
@@ -234,6 +240,25 @@ class CameraAttentionTests(unittest.TestCase):
 
 
 class ForcedYellowTests(unittest.TestCase):
+    def test_backup_fbp_is_independent_of_single_clean_red(self):
+        frames = [self._frame(1, .9), self._frame(2, .2), self._frame(3, .2)]
+        for face in frames[1].faces:
+            face.portrait_preference_score = .1
+        for face in frames[2].faces:
+            face.portrait_preference_score = .95
+        selected, _ = select_group_series(frames, self._config(1), diagnostic_log=False)
+        self.assertEqual(selected.main.photo.path.name, "IMG_0001.jpg")
+        self.assertEqual(selected.extras[0].photo.path.name, "IMG_0003.jpg")
+
+    def test_minimum_counts_unique_metadata_resources(self):
+        frames = [self._frame(i, .9) for i in range(1, 6)]
+        frames[1].photo.path = Path("IMG_0001.tif")
+        frames[3].photo.path = Path("img_0003.psd")
+        selected, _ = select_group_series(frames, self._config(2), diagnostic_log=False)
+        keys = [str(x.photo.path.with_suffix("")).casefold() for x in [selected.main, *selected.extras]]
+        self.assertEqual(len(selected.extras), 2)
+        self.assertEqual(len(set(keys)), 3)
+
     @staticmethod
     def _frame(index: int, frame_technical: float) -> FrameAssessment:
         faces = []
